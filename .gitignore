@@ -1,0 +1,43 @@
+# Data. Nothing under data/ is committed except the documentation and the
+# directory markers. Native structures are re-fetchable from the RCSB by
+# pdb_id, and the collaborator's design tables are not ours to redistribute.
+data/raw/*
+data/native/*
+data/interim/*
+!data/**/.gitkeep
+
+# Results and figures are build products of a specific run. They are
+# reproduced by re-running the scripts against a manifest, never committed.
+results/*
+!results/.gitkeep
+figures/*
+!figures/.gitkeep
+
+# Modal
+.modal/
+modal_output/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.python-version
+uv.lock
+
+# Tooling
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+
+# Editors and operating systems
+.vscode/
+.idea/
+.DS_Store
+*.swp

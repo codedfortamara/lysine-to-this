@@ -1,0 +1,76 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "interface-charge-rcsb"
+version = "0.1.0"
+description = "Interface-resolved charge partitioning and complex-aware refolding for charge-controlled ProteinMPNN designs on RCSB complexes"
+readme = "README.md"
+requires-python = ">=3.11,<3.13"
+license = { text = "MIT" }
+authors = [{ name = "Tamara Dinneen" }]
+keywords = ["protein design", "electrostatics", "protein-protein interface", "ProteinMPNN", "AlphaFold2-Multimer"]
+
+dependencies = [
+    "biopython>=1.83",
+    "numpy>=1.26",
+    "pandas>=2.2",
+    "freesasa>=2.2.1",
+    "matplotlib>=3.8",
+]
+
+[project.optional-dependencies]
+# Kept out of the default install so that the analysis environment stays light.
+# Only needed on the machine that launches the Modal jobs.
+modal = ["modal>=0.64"]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "ruff>=0.6",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/interface_charge"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "scripts", "tests", "modal_app"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # isort
+    "B",    # flake8-bugbear
+    "UP",   # pyupgrade
+    "SIM",  # flake8-simplify
+    "PTH",  # flake8-use-pathlib, enforces the "no string paths" convention
+    "RUF",
+]
+ignore = [
+    "E501",    # line length is handled by the formatter
+    "RUF001",  # ambiguous unicode is intentional in docstrings that quote angstrom symbols
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Scripts legitimately mutate sys.path before importing the package when run
+# without an editable install.
+"scripts/*.py" = ["E402"]
+"modal_app/*.py" = ["E402"]
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+markers = [
+    "slow: tests that run a full SASA calculation on the committed complex fixture",
+    "needs_network: tests that require access to files.rcsb.org",
+]
+
+[tool.coverage.run]
+source = ["src/interface_charge"]
