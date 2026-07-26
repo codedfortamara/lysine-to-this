@@ -1,0 +1,27 @@
+{
+  "built_utc": "2026-07-26T04:03:44+00:00",
+  "chains": [
+    "A",
+    "C"
+  ],
+  "counts": {
+    "A": {
+      "atoms": 4870,
+      "residues": 597
+    },
+    "C": {
+      "atoms": 1534,
+      "residues": 194
+    }
+  },
+  "intended_fixture": "1BRS (barnase-barstar) is the intended primary fixture. Build it with python tests/fixtures/build_fixture.py --pdb-id 1BRS --chains A D once files.rcsb.org is reachable; the test suite picks it up automatically.",
+  "output": "7ddo_fixture.pdb",
+  "sha256": "1c2dfbd325e1bf2436e94dcf36001de826753b62983072a4c5f6b222bdc14642",
+  "source": "biopython 1.87 sdist from PyPI, Tests/PDB/7DDO.pdb",
+  "source_note": "RCSB entry 7DDO, cryo-EM structure of human ACE2 with the SARS-CoV-2 GD/1/2019 RBD. Obtained from the Biopython test corpus on PyPI because files.rcsb.org was blocked by the network egress policy when this fixture was built. Chain A is ACE2, chain C is the RBD.",
+  "stripped": [
+    "waters and heteroatoms",
+    "hydrogens",
+    "alternate conformations after the first"
+  ]
+}
