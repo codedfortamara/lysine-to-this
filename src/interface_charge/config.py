@@ -227,6 +227,34 @@ class ComplementarityParams:
 
 
 @dataclass(frozen=True, slots=True)
+class SaltBridgeParams:
+    """Parameters for salt-bridge counting.
+
+    Two definitions are provided because they disagree substantially and the
+    size of that disagreement is itself worth reporting.
+    """
+
+    #: Maximum distance, in angstroms, between a cationic nitrogen and an
+    #: anionic oxygen for a salt bridge under the geometric definition. Four
+    #: angstroms between charged-group heavy atoms is the conventional
+    #: criterion (Barlow and Thornton, 1983).
+    cutoff_a: float = 4.0
+
+    #: Maximum distance, in angstroms, between the Cbeta atoms of oppositely
+    #: charged residues under the coarse proxy definition. Cbeta sits at the
+    #: base of the side chain, so this criterion is indifferent to which way
+    #: the charged group actually points and will count pairs whose side
+    #: chains face apart. Retained so the two definitions can be compared on
+    #: the same structures rather than argued about.
+    proxy_cbeta_cutoff_a: float = 6.0
+
+    #: Whether histidine counts as cationic. At pH 7.4 it is roughly a tenth
+    #: protonated, so counting it as a full positive charge overstates its
+    #: contribution. Off by default.
+    include_histidine: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class StructureParams:
     """Parameters for fetching and parsing native structures."""
 
@@ -331,6 +359,7 @@ class Config:
 
     interface: InterfaceParams = field(default_factory=InterfaceParams)
     charge: ChargeParams = field(default_factory=ChargeParams)
+    salt_bridge: SaltBridgeParams = field(default_factory=SaltBridgeParams)
     complementarity: ComplementarityParams = field(default_factory=ComplementarityParams)
     structure: StructureParams = field(default_factory=StructureParams)
     af2: AF2Params = field(default_factory=AF2Params)
@@ -342,7 +371,14 @@ class Config:
     def to_dict(self) -> dict[str, Any]:
         """Return a plain nested dict suitable for JSON serialisation."""
         out: dict[str, Any] = {"random_seed": self.random_seed}
-        for name in ("interface", "charge", "complementarity", "structure", "af2"):
+        for name in (
+            "interface",
+            "charge",
+            "salt_bridge",
+            "complementarity",
+            "structure",
+            "af2",
+        ):
             block = getattr(self, name)
             out[name] = {f: getattr(block, f) for f in block.__slots__}
         return out
@@ -353,6 +389,7 @@ DEFAULT_CONFIG: Final[Config] = Config()
 _BLOCKS: Final[tuple[str, ...]] = (
     "interface",
     "charge",
+    "salt_bridge",
     "complementarity",
     "structure",
     "af2",
@@ -445,3 +482,7 @@ def validate(config: Config) -> None:
         raise ValueError("structure.native_format must be 'cif' or 'pdb'")
     if config.af2.timeout_s <= 0:
         raise ValueError("af2.timeout_s must be positive")
+    if config.salt_bridge.cutoff_a <= 0:
+        raise ValueError("salt_bridge.cutoff_a must be positive")
+    if config.salt_bridge.proxy_cbeta_cutoff_a <= 0:
+        raise ValueError("salt_bridge.proxy_cbeta_cutoff_a must be positive")
