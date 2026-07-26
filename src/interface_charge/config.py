@@ -104,6 +104,19 @@ PKA_BJELLQVIST: Final[dict[str, float]] = {
     "Y": 10.0,
 }
 
+#: Published Modal on-demand rates in US dollars per GPU-hour, for the dry-run
+#: estimate only. UNVERIFIED: recorded from memory because modal.com was not
+#: reachable from the environment this was written in. Confirm before quoting.
+MODAL_GPU_RATES_USD_PER_HOUR: Final[dict[str, float]] = {
+    "T4": 0.59,
+    "L4": 0.80,
+    "A10G": 1.10,
+    "L40S": 1.95,
+    "A100-40GB": 2.10,
+    "A100-80GB": 2.50,
+    "H100": 3.95,
+}
+
 PKA_SETS: Final[dict[str, dict[str, float]]] = {
     "emboss": PKA_EMBOSS,
     "bjellqvist": PKA_BJELLQVIST,
@@ -284,10 +297,21 @@ class AF2Params:
     #: Maximum number of containers Modal may run at once.
     max_containers: int = 20
 
-    #: Published on-demand price per A100-40GB GPU-hour in US dollars, used
-    #: only for the dry-run estimate. Check against current Modal pricing
-    #: before quoting a number to anyone.
+    #: Published on-demand price per GPU-hour in US dollars, used only for the
+    #: dry-run estimate. CHECK AGAINST CURRENT MODAL PRICING before quoting a
+    #: number to anyone: these were recorded from memory and modal.com was not
+    #: reachable to verify them.
     usd_per_gpu_hour: float = 2.10
+
+    #: Cold start per container: image pull plus loading the model parameters
+    #: from the weights volume. Paid once per container, not once per job, so
+    #: it matters at small job counts and washes out at large ones.
+    cold_start_minutes: float = 3.0
+
+    #: Fraction added to cover failed jobs and their one retry. Refolding
+    #: failures are not random; large and heavily charged complexes fail more
+    #: often, so this is a floor rather than a typical case.
+    failure_overhead: float = 0.10
 
     #: Wall-clock estimate per job in minutes, used only by the dry run. This
     #: is a planning figure, not a measurement. Replace it with the observed

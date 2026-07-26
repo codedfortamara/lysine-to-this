@@ -53,12 +53,17 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
+from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from interface_charge.config import DEFAULT_CONFIG, AF2Params
+from interface_charge.config import (
+    DEFAULT_CONFIG,
+    MODAL_GPU_RATES_USD_PER_HOUR,
+    AF2Params,
+)
 
 try:  # pragma: no cover - exercised by whether the extra is installed
     import modal
@@ -178,28 +183,73 @@ def build_job_list(
     return jobs
 
 
-def estimate_cost(jobs: list[Job], params: AF2Params = PARAMS) -> dict[str, float | int]:
-    """Estimated GPU-hours and dollars for a job list.
+def estimate_cost(
+    jobs: list[Job] | int,
+    params: AF2Params = PARAMS,
+    gpu_type: str | None = None,
+) -> dict[str, Any]:
+    """Estimated GPU-hours and dollars for a job list, or for a bare job count.
 
-    Deliberately simple and deliberately conservative in what it claims: the
-    per-job minutes are a planning assumption stated in the config, not a
-    measurement, and the returned dict says so.
+    Accepts an integer so that a grid can be costed before ``designs.csv``
+    exists, which is the situation for most of the planning window.
+
+    Three things are counted that a jobs-times-minutes calculation misses, and
+    all three are real money:
+
+    * **Cold starts.** Each container pulls the image and loads the model
+      parameters from the weights volume once. Paid per container, not per job,
+      so it dominates a ten-job pilot and washes out over hundreds.
+    * **Failures and retries.** Refolding failures are not random: large and
+      heavily charged complexes fail more often, which is precisely the corner
+      of the grid this study cares about.
+    * **Wall-clock.** Reported alongside the cost because with the deadline in
+      view it is often the binding constraint, not the money.
+
+    The per-job minutes remain a planning assumption, not a measurement, and
+    the returned dict says so in ``estimate_basis``.
     """
-    gpu_hours = len(jobs) * params.estimated_minutes_per_job / 60.0
-    residues = [job.total_residues() for job in jobs]
-    return {
-        "n_jobs": len(jobs),
+    n_jobs = jobs if isinstance(jobs, int) else len(jobs)
+    gpu_type = gpu_type or params.gpu_type
+    rate = MODAL_GPU_RATES_USD_PER_HOUR.get(gpu_type)
+    if rate is None:
+        raise ValueError(
+            f"no published rate recorded for GPU {gpu_type!r}; "
+            f"known: {sorted(MODAL_GPU_RATES_USD_PER_HOUR)}"
+        )
+
+    containers = min(params.max_containers, n_jobs)
+    compute_hours = n_jobs * params.estimated_minutes_per_job / 60.0
+    cold_start_hours = containers * params.cold_start_minutes / 60.0
+    gpu_hours = (compute_hours + cold_start_hours) * (1.0 + params.failure_overhead)
+
+    out: dict[str, Any] = {
+        "n_jobs": n_jobs,
+        "gpu_type": gpu_type,
+        "usd_per_gpu_hour": rate,
         "estimated_minutes_per_job": params.estimated_minutes_per_job,
+        # Deliberately unrounded. Rounding here would destroy the arithmetic
+        # properties a caller may rely on (a grid of twice the size costing
+        # exactly twice the compute) and would compound across the comparison
+        # table. Round at the point of display instead.
+        "compute_gpu_hours": compute_hours,
+        "cold_start_gpu_hours": cold_start_hours,
+        "failure_overhead": params.failure_overhead,
         "estimated_gpu_hours": gpu_hours,
-        "estimated_usd": gpu_hours * params.usd_per_gpu_hour,
-        "usd_per_gpu_hour": params.usd_per_gpu_hour,
-        "gpu_type": params.gpu_type,
+        "estimated_usd": gpu_hours * rate,
         "max_containers": params.max_containers,
+        "estimated_wall_clock_hours": gpu_hours / max(containers, 1),
         "timeout_s": params.timeout_s,
-        "median_total_residues": sorted(residues)[len(residues) // 2] if residues else 0,
-        "max_total_residues": max(residues) if residues else 0,
-        "estimate_basis": "planning assumption from config.AF2Params, not a measurement",
+        "estimate_basis": (
+            "planning assumption from config.AF2Params, not a measurement; "
+            "GPU rate is UNVERIFIED, confirm against modal.com/pricing"
+        ),
     }
+
+    if not isinstance(jobs, int) and jobs:
+        residues = sorted(job.total_residues() for job in jobs)
+        out["median_total_residues"] = residues[len(residues) // 2]
+        out["max_total_residues"] = residues[-1]
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -567,6 +617,25 @@ def build_parser() -> argparse.ArgumentParser:
             "pilot run rather than the planning default."
         ),
     )
+    parser.add_argument(
+        "--gpu",
+        default=None,
+        choices=sorted(MODAL_GPU_RATES_USD_PER_HOUR),
+        help="Cost against this GPU type instead of the configured default.",
+    )
+    parser.add_argument(
+        "--compare-gpus",
+        action="store_true",
+        help="Cost the same grid across every GPU type with a recorded rate.",
+    )
+    grid = parser.add_argument_group(
+        "hypothetical grid",
+        "Cost a grid before designs.csv exists. Give all three to skip reading "
+        "the input tables entirely, which is the usual situation while planning.",
+    )
+    grid.add_argument("--assume-complexes", type=int, default=None)
+    grid.add_argument("--assume-betas", type=int, default=None)
+    grid.add_argument("--assume-replicates", type=int, default=None)
     return parser
 
 
@@ -589,33 +658,69 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
 
-    jobs = build_job_list(args.designs, args.definitions, args.test_set)
-
     params = PARAMS
     if args.minutes_per_job is not None:
-        from dataclasses import replace
-
         params = replace(params, estimated_minutes_per_job=args.minutes_per_job)
 
-    done = completed_keys()
-    outstanding = [job for job in jobs if job.key not in done]
-    estimate = estimate_cost(outstanding, params)
+    hypothetical = (args.assume_complexes, args.assume_betas, args.assume_replicates)
+    if any(v is not None for v in hypothetical):
+        if any(v is None for v in hypothetical):
+            print(
+                "ERROR: --assume-complexes, --assume-betas and --assume-replicates "
+                "must be given together.",
+                file=sys.stderr,
+            )
+            return 2
+        n_jobs = args.assume_complexes * args.assume_betas * args.assume_replicates
+        target: list[Job] | int = n_jobs
+        print("=== AlphaFold2-Multimer dry run (hypothetical grid) ===")
+        print(f"complexes:            {args.assume_complexes}")
+        print(f"beta values:          {args.assume_betas}")
+        print(f"replicates:           {args.assume_replicates}")
+        print(f"jobs:                 {n_jobs}")
+        print("\nNOTE: no input tables were read. This costs a grid you describe,")
+        print("not one that exists. Re-run without --assume-* once designs.csv is here.")
+    else:
+        jobs = build_job_list(args.designs, args.definitions, args.test_set)
+        done = completed_keys()
+        outstanding = [job for job in jobs if job.key not in done]
+        target = outstanding
+        print("=== AlphaFold2-Multimer dry run ===")
+        print(f"jobs enumerated:      {len(jobs)}")
+        print(f"already complete:     {len(done)}")
+        print(f"outstanding:          {len(outstanding)}")
+        print(f"unique complexes:     {len({job.pdb_id for job in jobs})}")
+        print(f"unique beta values:   {sorted({job.beta for job in jobs})}")
+        print(f"replicates per point: {sorted({job.replicate for job in jobs})}")
 
-    print("=== AlphaFold2-Multimer dry run ===")
-    print(f"jobs enumerated:      {len(jobs)}")
-    print(f"already complete:     {len(done)}")
-    print(f"outstanding:          {len(outstanding)}")
-    print(f"unique complexes:     {len({job.pdb_id for job in jobs})}")
-    print(f"unique beta values:   {sorted({job.beta for job in jobs})}")
-    print(f"replicates per point: {sorted({job.replicate for job in jobs})}")
-    print()
-    print(json.dumps(estimate, indent=2))
-    print()
+    if args.compare_gpus:
+        print(f"\n{'GPU':<12} {'USD/hr':>7} {'GPU-h':>8} {'cost':>9} {'wall-clock':>11}")
+        print("-" * 51)
+        for gpu in sorted(MODAL_GPU_RATES_USD_PER_HOUR, key=MODAL_GPU_RATES_USD_PER_HOUR.get):
+            e = estimate_cost(target, params, gpu_type=gpu)
+            print(
+                f"{gpu:<12} {e['usd_per_gpu_hour']:>7.2f} {e['estimated_gpu_hours']:>8.1f} "
+                f"${e['estimated_usd']:>8.0f} {e['estimated_wall_clock_hours']:>9.1f} h"
+            )
+        print("\nTWO CAVEATS, both of which flatter the cheap cards:")
+        print("  1. Minutes per job is held CONSTANT across GPU types here, which is")
+        print("     false. A T4 is several times slower than an A100 on the same job,")
+        print("     so its true cost is higher than shown and its wall-clock much")
+        print("     higher. Only a per-GPU pilot gives an honest comparison.")
+        print("  2. AlphaFold2-Multimer memory grows roughly with the square of total")
+        print("     length, so the largest complexes may not fit the smaller cards at")
+        print("     all. Verify on the largest complex before committing the grid.")
+    else:
+        print()
+        estimate = estimate_cost(target, params, gpu_type=args.gpu)
+        rounded = {k: (round(v, 2) if isinstance(v, float) else v) for k, v in estimate.items()}
+        print(json.dumps(rounded, indent=2))
+
     print(
-        f"NOTE: the {estimate['estimated_minutes_per_job']} minutes per job is a planning\n"
-        "assumption from config.AF2Params, not a measurement. Run a pilot of about ten\n"
-        "jobs, take the observed median, and re-run this with --minutes-per-job before\n"
-        "committing to a budget."
+        f"\nNOTE: {params.estimated_minutes_per_job} minutes per job is a planning "
+        "assumption from\nconfig.AF2Params, not a measurement, and the GPU rates are "
+        "UNVERIFIED. Run a pilot\nof about ten jobs, take the observed median, and "
+        "re-run with --minutes-per-job\nbefore committing to a budget."
     )
     return 0
 

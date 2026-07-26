@@ -356,27 +356,118 @@ def test_job_key_is_stable_and_filename_safe() -> None:
     assert positive.key != key
 
 
-def test_cost_estimate_scales_linearly() -> None:
+def test_cost_estimate_accounts_for_cold_starts_and_failures() -> None:
+    """Compute scales with jobs; cold starts scale with containers, then stop.
+
+    The distinction matters for real money. A ten-job pilot is dominated by
+    cold starts, so costing it as jobs times minutes understates it badly. A
+    four-hundred-job grid is dominated by compute, and once the container cap
+    is reached the cold-start term stops growing entirely.
+    """
     sys.path.insert(0, str(REPO_ROOT / "modal_app"))
-    from af2_multimer import Job, estimate_cost
+    from af2_multimer import PARAMS, estimate_cost
 
-    def make(n: int) -> list[Job]:
-        return [
-            Job(
-                pdb_id="1BRS",
-                beta=0.0,
-                replicate=i,
-                designed_chain="A",
-                chains={"A": "MKV", "D": "MKV"},
-                msa_mode={"A": "single_sequence", "D": "msa"},
-            )
-            for i in range(n)
-        ]
+    small = estimate_cost(10)
+    large = estimate_cost(20)
 
-    one = estimate_cost(make(10))
-    two = estimate_cost(make(20))
-    assert two["estimated_gpu_hours"] == pytest.approx(2 * one["estimated_gpu_hours"])
-    assert two["estimated_usd"] == pytest.approx(2 * one["estimated_usd"])
+    # Compute hours are exactly linear in the job count.
+    assert large["compute_gpu_hours"] == pytest.approx(2 * small["compute_gpu_hours"])
+
+    # The total exceeds bare compute, because cold starts and retries are real.
+    assert small["estimated_gpu_hours"] > small["compute_gpu_hours"]
+    assert small["cold_start_gpu_hours"] > 0
+
+    # Beyond the container cap the cold-start term is constant, so cost becomes
+    # linear in jobs and the pilot's per-job overhead disappears.
+    capped_a = estimate_cost(PARAMS.max_containers * 10)
+    capped_b = estimate_cost(PARAMS.max_containers * 20)
+    assert capped_a["cold_start_gpu_hours"] == pytest.approx(capped_b["cold_start_gpu_hours"])
+
+    # A pilot carries proportionally far more overhead than the full grid.
+    pilot_overhead = small["cold_start_gpu_hours"] / small["compute_gpu_hours"]
+    grid_overhead = capped_b["cold_start_gpu_hours"] / capped_b["compute_gpu_hours"]
+    assert pilot_overhead > 10 * grid_overhead
+
+
+def test_cost_estimate_accepts_a_bare_job_count() -> None:
+    """A grid must be costable before designs.csv exists, which is most of the time."""
+    sys.path.insert(0, str(REPO_ROOT / "modal_app"))
+    from af2_multimer import estimate_cost
+
+    estimate = estimate_cost(26 * 5 * 3)
+    assert estimate["n_jobs"] == 390
+    assert estimate["estimated_usd"] > 0
+    assert "UNVERIFIED" in estimate["estimate_basis"]
+    # No job list, so no residue statistics may be invented.
+    assert "median_total_residues" not in estimate
+
+
+def test_cheaper_gpu_costs_less_for_the_same_grid() -> None:
+    sys.path.insert(0, str(REPO_ROOT / "modal_app"))
+    from af2_multimer import estimate_cost
+
+    a100 = estimate_cost(390, gpu_type="A100-40GB")
+    l4 = estimate_cost(390, gpu_type="L4")
+    assert l4["estimated_usd"] < a100["estimated_usd"]
+    # Same GPU-hours: the model holds minutes-per-job constant across cards,
+    # which is exactly why the CLI prints a caveat saying so.
+    assert l4["estimated_gpu_hours"] == pytest.approx(a100["estimated_gpu_hours"])
+
+
+def test_unknown_gpu_raises_rather_than_guessing_a_rate() -> None:
+    sys.path.insert(0, str(REPO_ROOT / "modal_app"))
+    from af2_multimer import estimate_cost
+
+    with pytest.raises(ValueError, match="no published rate"):
+        estimate_cost(100, gpu_type="RTX4090")
+
+
+def test_hypothetical_dry_run_needs_no_input_tables() -> None:
+    """The planning path must work with no designs.csv anywhere on disk."""
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(REPO_ROOT / "modal_app" / "af2_multimer.py"),
+            "--dry-run",
+            "--assume-complexes",
+            "26",
+            "--assume-betas",
+            "5",
+            "--assume-replicates",
+            "3",
+            "--compare-gpus",
+        ],
+        capture_output=True,
+        text=True,
+        cwd=REPO_ROOT,
+        timeout=120,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "jobs:                 390" in result.stdout
+    assert "no input tables were read" in result.stdout
+    assert "A100-40GB" in result.stdout and "L4" in result.stdout
+    assert "CAVEATS" in result.stdout
+
+
+def test_partial_hypothetical_grid_is_rejected() -> None:
+    """Two of the three counts is an ambiguous request, not a default."""
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(REPO_ROOT / "modal_app" / "af2_multimer.py"),
+            "--dry-run",
+            "--assume-complexes",
+            "26",
+        ],
+        capture_output=True,
+        text=True,
+        cwd=REPO_ROOT,
+        timeout=120,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert "must be given together" in result.stderr
 
 
 def test_timeout_is_a_single_named_constant() -> None:
