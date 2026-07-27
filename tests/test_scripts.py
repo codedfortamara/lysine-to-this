@@ -520,3 +520,75 @@ def test_redesigned_chain_uses_single_sequence_mode(tmp_path, structure_case, ex
     job = jobs[0]
     assert job.msa_mode[chain_b] == "single_sequence"
     assert job.msa_mode[chain_a] == "msa"
+
+
+# ---------------------------------------------------------------------------
+# Design regeneration (the pure parts; sampling needs torch and ProteinMPNN)
+# ---------------------------------------------------------------------------
+
+
+def _regen_module():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("regen", SCRIPTS / "10_regenerate_designs.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_derived_seed_is_stable_and_distinct() -> None:
+    """Same inputs give the same seed; any change gives a different one."""
+    regen = _regen_module()
+    base = regen.derive_seed(0, "1BRS", 1.5, 0)
+    assert base == regen.derive_seed(0, "1BRS", 1.5, 0)
+    assert base != regen.derive_seed(1, "1BRS", 1.5, 0)
+    assert base != regen.derive_seed(0, "1BRT", 1.5, 0)
+    assert base != regen.derive_seed(0, "1BRS", -1.5, 0)
+    assert base != regen.derive_seed(0, "1BRS", 1.5, 1)
+
+
+def test_derived_seed_does_not_shift_when_the_grid_grows() -> None:
+    """Hashing rather than counting: adding a beta must not move other seeds.
+
+    With a running counter, inserting a value into the grid would renumber
+    every design after it and silently invalidate an existing run.
+    """
+    regen = _regen_module()
+    before = {b: regen.derive_seed(0, "1BRS", b, 0) for b in (-1.5, 0.0, 1.5)}
+    after = {b: regen.derive_seed(0, "1BRS", b, 0) for b in (-3.0, -1.5, 0.0, 1.5, 3.0)}
+    for beta, seed in before.items():
+        assert after[beta] == seed
+
+
+def test_seed_is_in_range_for_torch() -> None:
+    regen = _regen_module()
+    for replicate in range(20):
+        assert 0 <= regen.derive_seed(0, "1BRS", 1.5, replicate) < 2**32
+
+
+def test_alphabet_matches_proteinmpnn_exactly() -> None:
+    """Indexing the bias against the wrong alphabet biases the wrong residues.
+
+    The source paper flags this as a silent failure that moves no charge, so
+    the ordering is pinned here rather than trusted.
+    """
+    regen = _regen_module()
+    assert regen.MPNN_ALPHABET == "ACDEFGHIKLMNPQRSTVWYX"
+    assert regen.MPNN_ALPHABET.index("D") == 2
+    assert regen.MPNN_ALPHABET.index("E") == 3
+    assert regen.MPNN_ALPHABET.index("K") == 8
+    assert regen.MPNN_ALPHABET.index("R") == 14
+
+
+def test_unknown_residue_code_raises_rather_than_becoming_alanine() -> None:
+    """The upstream export rewrites X to A. That would shift a net charge."""
+    regen = _regen_module()
+    x_index = regen.MPNN_ALPHABET.index("X")
+    with pytest.raises(ValueError, match="alanine"):
+        regen.sequence_from_indices([x_index], [0])
+
+
+def test_known_residue_codes_decode() -> None:
+    regen = _regen_module()
+    indices = [regen.MPNN_ALPHABET.index(aa) for aa in "MKVDE"]
+    assert regen.sequence_from_indices(indices, list(range(5))) == "MKVDE"
