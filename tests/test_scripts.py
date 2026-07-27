@@ -105,13 +105,31 @@ def test_missing_data_error_quotes_the_contract(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("name", ["04_join_and_analyse.py", "05_figures.py"])
+@pytest.mark.parametrize("name", ["05_figures.py"])
 def test_skeleton_scripts_refuse_to_pretend(name: str) -> None:
-    """A stub that silently produced an empty table would be worse than a stub."""
+    """A stub that silently produced an empty table would be worse than a stub.
+
+    04 was a skeleton and is now implemented, so it is no longer listed here.
+    05 still depends on 04's output and remains a documented stub.
+    """
     result = run_script(name)
     assert result.returncode != 0
     assert "NotImplementedError" in result.stderr
     assert "skeleton" in result.stderr
+
+
+def test_analysis_script_fails_cleanly_without_its_input(tmp_path: Path) -> None:
+    """04 is implemented, so it must fail like a real script, not like a stub."""
+    result = run_script(
+        "04_join_and_analyse.py",
+        "--charge-partitions",
+        str(tmp_path / "absent.csv"),
+        "--results-dir",
+        str(tmp_path / "results"),
+    )
+    assert result.returncode != 0
+    assert "Traceback" not in result.stderr
+    assert "02_partition_charge" in result.stderr
 
 
 # ---------------------------------------------------------------------------
