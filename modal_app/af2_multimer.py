@@ -141,6 +141,19 @@ JAX_PACKAGE: str = "jax[cuda12_pip]==0.4.23"
 #: 0.0.10 needs it. Recorded so the constraint is checkable rather than folklore.
 JAX_MAX_WITH_LINEAR_UTIL: str = "0.4.23"
 
+#: Where the CUDA-tagged jaxlib actually lives.
+#:
+#: ``jaxlib==0.4.23+cuda12.cudnn89`` is not on PyPI. Local version identifiers
+#: like ``+cuda12.cudnn89`` are not accepted there, so the CUDA builds are
+#: published on this page instead, and pip only sees them when pointed at it.
+#:
+#: It has to be ``-f`` (find-links) rather than ``--extra-index-url``. The page
+#: is a flat HTML list of wheel links, not a PEP 503 index, so an index-style
+#: flag reaches it and finds nothing. The first attempt passed this URL as
+#: ``--extra-index-url`` on the *colabfold* install, where it was neither needed
+#: nor effective, and omitted it from the jax install, where it was essential.
+JAX_FIND_LINKS: str = "-f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html"
+
 #: colabfold 1.5.5 declares ``requires_python >=3.9,<3.12``.
 IMAGE_PYTHON_VERSION: str = "3.11"
 
@@ -775,12 +788,13 @@ if MODAL_AVAILABLE:  # pragma: no cover - requires Modal
         modal.Image.debian_slim(python_version=IMAGE_PYTHON_VERSION)
         .apt_install("git", "wget", "build-essential")
         # ColabFold provides an AlphaFold2-Multimer implementation with a
-        # single-sequence mode, which is what the redesigned chains need.
-        .pip_install(
-            *IMAGE_PACKAGES,
-            extra_options="--extra-index-url https://storage.googleapis.com/jax-releases/jax_cuda_releases.html",
-        )
-        .pip_install(JAX_PACKAGE)
+        # single-sequence mode, which is what the redesigned chains need. All
+        # of these are on PyPI, so no extra index is involved.
+        .pip_install(*IMAGE_PACKAGES)
+        # JAX is separate because the CUDA-tagged jaxlib is not on PyPI and has
+        # to be found on the jax-releases page. This is the install that needs
+        # the find-links, and the one that was missing it.
+        .pip_install(JAX_PACKAGE, extra_options=JAX_FIND_LINKS)
         .env({"XLA_PYTHON_CLIENT_PREALLOCATE": "false", "TF_FORCE_UNIFIED_MEMORY": "1"})
         # Ship the project's own package. Modal mounts the entrypoint module and
         # nothing else, so without this the container has af2_multimer.py and no

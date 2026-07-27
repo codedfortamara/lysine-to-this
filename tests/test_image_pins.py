@@ -25,6 +25,7 @@ from af2_multimer import (
     COLABFOLD_VERSION,
     IMAGE_PACKAGES,
     IMAGE_PYTHON_VERSION,
+    JAX_FIND_LINKS,
     JAX_MAX_WITH_LINEAR_UTIL,
     JAX_PACKAGE,
     LOCAL_PYTHON_SOURCES,
@@ -135,6 +136,26 @@ def test_the_cuda_extra_pulls_a_gpu_build() -> None:
         f"{JAX_PACKAGE!r} does not request the cuda12_pip extra; a CPU jaxlib "
         "would run but take orders of magnitude longer"
     )
+
+
+def test_the_cuda_jaxlib_is_looked_for_where_it_lives() -> None:
+    """jaxlib==0.4.23+cuda12.cudnn89 is not on PyPI, and the build says so.
+
+    Local version identifiers like +cuda12.cudnn89 are not accepted on PyPI, so
+    the CUDA builds are published on a separate page. pip only sees them when
+    pointed at it, and it must be -f, because that page is a flat list of wheel
+    links rather than a PEP 503 index: an index-style flag reaches it and finds
+    nothing.
+
+    The first attempt put this URL on the colabfold install, where it was
+    neither needed nor effective, and left it off the jax install, where it was
+    the whole point.
+    """
+    assert JAX_FIND_LINKS.startswith("-f "), (
+        f"{JAX_FIND_LINKS!r} must use -f. The jax releases page is a find-links "
+        "page, not an index, so --extra-index-url silently finds nothing there."
+    )
+    assert "jax_cuda_releases" in JAX_FIND_LINKS
 
 
 def test_the_image_python_is_one_colabfold_supports() -> None:
