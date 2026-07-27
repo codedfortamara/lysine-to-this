@@ -155,8 +155,19 @@ def main(argv: list[str] | None = None) -> int:
                     }
                 )
 
+                # Per-residue relative SASA, exported so that a burial-matched
+                # control can be run downstream. ProteinMPNN's sequence recovery
+                # is strongly graded by burial, and interface residues sit
+                # between deep core and bulk surface on that gradient, so any
+                # interface-versus-surface comparison of how much imposed bias a
+                # region absorbs is confounded unless burial is conditioned on.
+                relative_sasa = [
+                    classification.relative_monomer_sasa[rid] for rid in extract.residue_ids()
+                ]
+
                 per_chain[chain_id] = {
                     "sequence": extract.sequence,
+                    "relative_sasa": [round(v, 4) for v in relative_sasa],
                     "interface_positions": sorted(interface_idx),
                     "core_positions": sorted(core_idx),
                     "interface_residue_ids": sorted(
