@@ -45,6 +45,7 @@ from .structures import (
     ChainExtract,
     ResidueId,
     StructureError,
+    chains_present,
     extract_chain,
     heavy_atoms,
     residue_id,
@@ -56,6 +57,7 @@ __all__ = [
     "InterfaceDefinition",
     "Partition",
     "ResidueClassification",
+    "choose_contacting_partner",
     "classify_residues",
     "compare_definitions",
     "define_interface",
@@ -423,6 +425,52 @@ def classify_residues(
         monomer_sasa={rid: float(monomer_sasa.get(rid, 0.0)) for rid in partition},
         relative_monomer_sasa=relative,
     )
+
+
+def choose_contacting_partner(
+    model: Model,
+    designed_chain: str,
+    interface_params: InterfaceParams,
+    structure_params: StructureParams,
+) -> tuple[str | None, dict[str, int]]:
+    """Pick the partner chain by contact, not by size.
+
+    Returns ``(chain_id, contacts_by_chain)``, with ``chain_id`` None when no
+    chain touches the designed one at all.
+
+    Choosing the largest other chain is wrong, and quietly so. A deposited
+    asymmetric unit frequently holds several copies of an assembly, and the
+    largest other chain is often a copy from a neighbouring one that never
+    touches the chain in question. The result is not an error but an empty
+    interface, which then propagates as a legitimate-looking zero into every
+    partition and every average.
+
+    Selecting by contact count fixes it and also makes the failure honest: a
+    chain that genuinely has no protein partner returns None, and the caller can
+    exclude it deliberately rather than average a spurious zero.
+
+    Ties are broken by chain identifier so the choice is reproducible.
+    """
+    contacts: dict[str, int] = {}
+    for chain_id in chains_present(model):
+        if chain_id == designed_chain:
+            continue
+        try:
+            extract_chain(model, chain_id, structure_params)
+            residues = interface_by_contact(
+                model, designed_chain, chain_id, interface_params, structure_params
+            )
+        except (StructureError, ValueError):
+            continue
+        count = len({r for r in residues if r.chain == designed_chain})
+        if count:
+            contacts[chain_id] = count
+
+    if not contacts:
+        return None, {}
+
+    best = max(sorted(contacts), key=lambda c: contacts[c])
+    return best, contacts
 
 
 def define_interface(

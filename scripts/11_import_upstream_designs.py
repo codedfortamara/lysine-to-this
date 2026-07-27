@@ -37,8 +37,14 @@ import pandas as pd
 from interface_charge.charge import net_charge_simple
 from interface_charge.cli import banner, fail
 from interface_charge.config import DEFAULT_CONFIG, NATIVE_DIR, RAW_DIR
+from interface_charge.interface import choose_contacting_partner
 from interface_charge.provenance import manifest_path_for, run_manifest
-from interface_charge.structures import StructureError, chains_present, extract_chain, load_model
+from interface_charge.structures import (
+    StructureError,
+    chains_present,
+    extract_chain,
+    load_model,
+)
 
 #: Minimum fraction of positions that must agree for a chain to be accepted as
 #: the one the export describes. Set high because the comparison is against the
@@ -91,9 +97,40 @@ def match_chain(
         scores.append((identity(extract.sequence, native_seq), chain_id))
 
     if not scores:
+        # Report how close the nearest chain is, because the distance says what
+        # kind of problem this is. A difference of one or two residues is a
+        # parser disagreement: ProteinMPNN's parse_PDB requires a complete
+        # N/CA/C/O backbone and drops residues missing one, while this project
+        # keeps any residue with a recognised name. A large difference means a
+        # genuinely different chain or a revised entry.
+        available = {}
+        for chain_id in chains_present(model):
+            try:
+                available[chain_id] = len(extract_chain(model, chain_id, structure_params).sequence)
+            except StructureError:
+                continue
+        nearest = (
+            min(available.items(), key=lambda kv: abs(kv[1] - len(native_seq)))
+            if available
+            else None
+        )
+        detail = ""
+        if nearest is not None:
+            chain_id, length = nearest
+            gap = length - len(native_seq)
+            detail = f" Nearest is chain {chain_id} at {length} residues, {gap:+d} from the export."
+            if abs(gap) <= 3:
+                detail += (
+                    " A difference this small is a parser disagreement over residues "
+                    "with incomplete backbones, not a different chain. It is left "
+                    "unmatched deliberately: reconciling it would require aligning the "
+                    "exported sequence onto the structure's residues, and a one-residue "
+                    "offset there would silently shift every interface index rather "
+                    "than fail visibly."
+                )
         raise StructureError(
-            f"no chain of length {len(native_seq)} found. Chains present: "
-            f"{chains_present(model)}. The export and the structure disagree."
+            f"no chain of length {len(native_seq)} found. Chain lengths present: "
+            f"{available or chains_present(model)}.{detail}"
         )
 
     scores.sort(reverse=True)
@@ -190,6 +227,7 @@ def main(argv: list[str] | None = None) -> int:
     test_rows: list[dict] = []
     skipped: list[tuple[str, str]] = []
     tie_notes: list[dict[str, str]] = []
+    partner_notes: list[dict] = []
 
     with run_manifest(
         script=Path(__file__),
@@ -197,6 +235,7 @@ def main(argv: list[str] | None = None) -> int:
             "min_identity": MIN_IDENTITY,
             "betas": payload.get("betas"),
             "partner_sequence": "native (upstream discarded the designed partner)",
+            "partner_selection": "most heavy-atom contacts with the designed chain",
             "prefer_chain": args.prefer_chain,
             "homodimer_policy": args.homodimer,
         },
@@ -225,20 +264,38 @@ def main(argv: list[str] | None = None) -> int:
                 if tie_note:
                     tie_notes.append({"pdb_id": pdb_id, "note": tie_note})
 
-                partner_sizes = {}
-                for chain_id in chains_present(model):
-                    if chain_id == designed_chain:
-                        continue
-                    try:
-                        partner_sizes[chain_id] = len(
-                            extract_chain(model, chain_id, config.structure).sequence
+                # Choose the partner by contact rather than by size. A deposited
+                # asymmetric unit often holds several copies of an assembly, and
+                # the largest other chain is frequently a copy from a
+                # neighbouring one that never touches the designed chain. That
+                # produces an empty interface, which then propagates as a
+                # legitimate-looking zero through every partition and average.
+                partner_chain, contacts = choose_contacting_partner(
+                    model, designed_chain, config.interface, config.structure
+                )
+                if partner_chain is None:
+                    skipped.append(
+                        (
+                            pdb_id,
+                            f"no chain contacts the designed chain {designed_chain}; this "
+                            "entry has no protein-protein interface to analyse",
                         )
-                    except StructureError:
-                        continue
-                if not partner_sizes:
-                    skipped.append((pdb_id, "no partner protein chain in the structure"))
+                    )
                     continue
-                partner_chain = max(partner_sizes, key=lambda c: partner_sizes[c])
+                partner_sizes = {
+                    partner_chain: len(
+                        extract_chain(model, partner_chain, config.structure).sequence
+                    )
+                }
+                if len(contacts) > 1:
+                    partner_notes.append(
+                        {
+                            "pdb_id": pdb_id,
+                            "designed_chain": designed_chain,
+                            "chosen": partner_chain,
+                            "contacts_by_chain": contacts,
+                        }
+                    )
 
             except StructureError as exc:
                 skipped.append((pdb_id, str(exc)))
@@ -299,6 +356,7 @@ def main(argv: list[str] | None = None) -> int:
         manifest.note("n_complexes", len(test_rows))
         manifest.note("n_skipped", len(skipped))
         manifest.note("n_ties_resolved", len(tie_notes))
+        manifest.note("partner_chosen_by_contact", partner_notes)
         manifest.note("ties_resolved", tie_notes)
         manifest.note(
             "skip_reasons",

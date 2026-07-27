@@ -314,3 +314,63 @@ def test_interface_definition_is_deterministic(model, structure_case, config) ->
 def test_missing_chain_raises_with_a_useful_message(model, config) -> None:
     with pytest.raises(StructureError, match="not in model"):
         residue_sasa(model, ("Z",), config.interface, config.structure)
+
+
+# ---------------------------------------------------------------------------
+# Partner selection
+# ---------------------------------------------------------------------------
+
+
+def test_partner_is_chosen_by_contact(model, structure_case, config) -> None:
+    from interface_charge.interface import choose_contacting_partner
+
+    _, chain_a, chain_b = structure_case
+    partner, contacts = choose_contacting_partner(
+        model, chain_a, config.interface, config.structure
+    )
+    assert partner == chain_b
+    assert contacts[chain_b] > 0
+
+
+def test_partner_selection_is_symmetric_on_a_two_chain_complex(
+    model, structure_case, config
+) -> None:
+    from interface_charge.interface import choose_contacting_partner
+
+    _, chain_a, chain_b = structure_case
+    assert (
+        choose_contacting_partner(model, chain_a, config.interface, config.structure)[0] == chain_b
+    )
+    assert (
+        choose_contacting_partner(model, chain_b, config.interface, config.structure)[0] == chain_a
+    )
+
+
+def test_no_contacting_partner_returns_none_rather_than_a_guess(
+    model, structure_case, config
+) -> None:
+    """A chain with no protein partner must be excludable, not silently zeroed.
+
+    Returning the largest other chain regardless of contact was the original
+    behaviour, and it produced empty interfaces that propagated as
+    legitimate-looking zeros into every partition and every average.
+    """
+    from interface_charge.interface import choose_contacting_partner
+    from interface_charge.structures import submodel
+
+    _, chain_a, _ = structure_case
+    alone = submodel(model, (chain_a,), config.structure)
+    partner, contacts = choose_contacting_partner(
+        alone, chain_a, config.interface, config.structure
+    )
+    assert partner is None
+    assert contacts == {}
+
+
+def test_partner_selection_is_deterministic(model, structure_case, config) -> None:
+    from interface_charge.interface import choose_contacting_partner
+
+    _, chain_a, _ = structure_case
+    first = choose_contacting_partner(model, chain_a, config.interface, config.structure)
+    second = choose_contacting_partner(model, chain_a, config.interface, config.structure)
+    assert first == second
