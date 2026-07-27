@@ -143,22 +143,54 @@ is absent.
 
 `modal_app/af2_multimer.py --dry-run` prints the job count and an estimated
 GPU-hour cost without launching anything, and it works without `modal`
-installed. The arithmetic matters here because the grid size decides whether
-this fits the stated ceiling of a couple of hundred US dollars:
+installed. The real grid is **55 complexes at 5 betas, one replicate each: 275
+jobs**, spanning 99 to 1257 total residues.
 
-| Grid | Jobs | GPU-hours at 8 min/job | Cost at $2.10/hr |
-| --- | --- | --- | --- |
-| 26 complexes, 5 betas, 8 replicates | 1040 | 139 | about $291 |
-| 26 complexes, 5 betas, 3 replicates | 390 | 52 | about $109 |
-| 26 complexes, 3 betas, 3 replicates | 234 | 31 | about $66 |
+Against the ceiling of $122:
 
-**Recommendation: 5 betas and 3 replicates.** That keeps the charge axis wide
-enough to show the trend, stays inside budget, and leaves headroom to re-run
-the extremes at higher replication if the interface metrics turn out noisy.
+| Treatment | Minutes per job | Estimate |
+| --- | --- | --- |
+| Single sequence throughout | 8 | about $87 |
+| Native partner keeps its MSA | 8 + 3 | about $119 |
+| Wave 1 only, beta 0 and +/-1.5 | 8 + 3 | about $72 |
 
-The 8 minutes per job is a *planning figure, not a measurement*. Run a pilot of
-about ten jobs first, take the observed median, and put it in
-`config.AF2Params.estimated_minutes_per_job` before quoting a cost to anyone.
+Running the native partner with an MSA is the right call scientifically, but it
+costs about 38 percent more and leaves only a few dollars of headroom. The dry
+run reports that headroom against `--budget-usd` and says so when it is tight.
+
+Both figures are *planning assumptions, not measurements*, and the MSA overhead
+is the one most worth replacing with a real number because it applies to every
+job in the grid.
+
+### Pilot first
+
+```
+modal run modal_app/af2_multimer.py --pilot 4
+```
+
+This runs four complexes at two charge settings each, eight jobs and roughly
+four dollars, then re-costs the full grid from what it observed and stops. The
+results stay on the volume and count towards the grid, so nothing is wasted.
+
+Two things it gets right that a naive pilot does not:
+
+* **It samples across the size distribution**, not just the largest complexes.
+  Canary ordering runs the largest first, which is correct for surfacing
+  out-of-memory and timeout quickly, but a median taken from the largest
+  complexes extrapolates to a cost well above what the grid will pay. The
+  largest complex is still included, so the risk check is not lost.
+* **It runs each complex at more than one beta.** The MMseqs2 search is paid
+  once per complex and cached for the other four charge settings, so a pilot of
+  distinct complexes measures only cold jobs. Four jobs in five in the real grid
+  are warm. Measuring both is the difference between a projection that is right
+  and one that is high by roughly the MSA overhead times four fifths of the
+  grid.
+
+If the projection comes in over budget, run wave 1 only with `--wave 1`. Wave 2
+(beta +/-3) is the part to drop: the upstream data shows only 10 to 18 percent
+of those designs fold at all, so it largely confirms that a broken monomer is
+still broken.
+
 The per-call timeout is a single constant, `AF2Params.timeout_s`, set to two
 hours, sized for the largest complex rather than the median.
 

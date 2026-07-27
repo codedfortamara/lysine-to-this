@@ -459,6 +459,138 @@ def chunked(items: list, size: int) -> list[list]:
 
 
 # ---------------------------------------------------------------------------
+# Pilot selection and extrapolation
+# ---------------------------------------------------------------------------
+
+
+def select_pilot(jobs: list[Job], n_complexes: int = 4, betas_each: int = 2) -> list[Job]:
+    """Choose a small job set that measures the two costs the grid is made of.
+
+    A pilot exists to replace a planning assumption with a measurement, so it
+    has to measure the same thing the grid will spend. Two traps here, and the
+    obvious pilot falls into both.
+
+    **Do not pilot only the largest complexes.** Canary ordering runs the
+    largest first, which is right for surfacing out-of-memory and timeout
+    quickly, but a median taken from the largest complexes extrapolates to a cost
+    far above what the grid will actually pay. The pilot therefore takes a
+    spread across the size distribution, while still including the largest so
+    the risk check is not lost.
+
+    **Do not pilot one beta per complex.** The MMseqs2 search is paid once per
+    complex and cached for the other four charge settings, so a pilot of
+    distinct complexes measures only cold jobs and overstates the grid, where
+    four jobs in five are warm. Running each pilot complex at more than one beta
+    measures both, and ``extrapolate_from_pilot`` uses them separately.
+    """
+    if n_complexes < 1 or betas_each < 1:
+        raise ValueError(
+            f"pilot needs at least one complex and one beta, got {n_complexes} and {betas_each}"
+        )
+
+    by_complex: dict[str, list[Job]] = {}
+    for job in jobs:
+        by_complex.setdefault(job.pdb_id, []).append(job)
+
+    # Order complexes by size, then take evenly spaced ranks so the sample spans
+    # the distribution rather than clustering at one end.
+    ranked = sorted(by_complex, key=lambda pdb: max(j.total_residues() for j in by_complex[pdb]))
+    if not ranked:
+        return []
+    n_complexes = min(n_complexes, len(ranked))
+    if n_complexes == 1:
+        picked = [ranked[-1]]
+    else:
+        step = (len(ranked) - 1) / (n_complexes - 1)
+        picked = [ranked[round(i * step)] for i in range(n_complexes)]
+        picked[-1] = ranked[-1]  # always keep the largest, for the risk check
+
+    selected: list[Job] = []
+    for pdb_id in dict.fromkeys(picked):
+        # Sort by |beta| so the reference setting is the cold job and the
+        # extreme setting is warm, which is the order the grid will run in.
+        candidates = sorted(by_complex[pdb_id], key=lambda j: (abs(j.beta), j.beta, j.replicate))
+        selected.extend(candidates[:betas_each])
+    return selected
+
+
+def extrapolate_from_pilot(
+    results: list[dict],
+    n_grid_jobs: int,
+    n_grid_complexes: int,
+    params: AF2Params = PARAMS,
+    gpu_type: str | None = None,
+) -> dict[str, Any]:
+    """Re-cost the full grid from observed pilot timings.
+
+    The first job of a complex pays the MMseqs2 search and the rest reuse it, so
+    the grid costs one cold job per complex plus warm jobs for everything else.
+    Costing every job at the cold rate would overstate the grid by roughly the
+    MSA overhead times four fifths of it.
+
+    Falls back to treating every observed job as cold when the pilot did not
+    contain a warm one, which is the conservative direction: it can only
+    overstate, never understate, and an overstated estimate stops a run rather
+    than blowing a budget.
+    """
+    import statistics as _statistics
+
+    seen: set[str] = set()
+    cold: list[float] = []
+    warm: list[float] = []
+    for result in results:
+        if not isinstance(result, dict) or result.get("wall_clock_s") is None:
+            continue
+        pdb_id = str(result.get("pdb_id", ""))
+        minutes = float(result["wall_clock_s"]) / 60.0
+        if pdb_id in seen:
+            warm.append(minutes)
+        else:
+            seen.add(pdb_id)
+            cold.append(minutes)
+
+    if not cold and not warm:
+        raise ValueError(
+            "the pilot returned no timed job. Nothing can be extrapolated from "
+            "it, and guessing here is exactly what the pilot was meant to stop."
+        )
+
+    cold_median = _statistics.median(cold) if cold else _statistics.median(warm)
+    warm_median = _statistics.median(warm) if warm else cold_median
+
+    n_cold = min(n_grid_complexes, n_grid_jobs)
+    n_warm = max(0, n_grid_jobs - n_cold)
+    compute_hours = (n_cold * cold_median + n_warm * warm_median) / 60.0
+
+    gpu_type = gpu_type or params.gpu_type
+    rate = MODAL_GPU_RATES_USD_PER_HOUR[gpu_type]
+    containers = min(params.max_containers, n_grid_jobs)
+    cold_start_hours = containers * params.cold_start_minutes / 60.0
+    gpu_hours = (compute_hours + cold_start_hours) * (1.0 + params.failure_overhead)
+
+    return {
+        "n_pilot_jobs_timed": len(cold) + len(warm),
+        "observed_cold_minutes_median": cold_median,
+        "observed_warm_minutes_median": warm_median,
+        "observed_max_minutes": max(cold + warm),
+        "msa_overhead_observed_minutes": cold_median - warm_median,
+        "warm_measured": bool(warm),
+        "n_grid_jobs": n_grid_jobs,
+        "n_grid_cold_jobs": n_cold,
+        "n_grid_warm_jobs": n_warm,
+        "estimated_gpu_hours": gpu_hours,
+        "estimated_usd": gpu_hours * rate,
+        "estimated_wall_clock_hours": gpu_hours / max(containers, 1),
+        "basis": (
+            "measured from the pilot, one cold job per complex plus warm jobs for the rest"
+            if warm
+            else "measured from the pilot, but no warm job was observed, so every "
+            "grid job is costed at the cold rate. This overstates the grid."
+        ),
+    }
+
+
+# ---------------------------------------------------------------------------
 # Mixed-mode MSAs
 # ---------------------------------------------------------------------------
 
@@ -708,12 +840,19 @@ if MODAL_AVAILABLE:  # pragma: no cover - requires Modal
         chunk_size: int = 20,
         n_canary: int = 5,
         yes: bool = False,
+        pilot: int = 0,
+        pilot_betas: int = 2,
     ) -> None:
         """Launch the grid in waves, largest complexes first, gated between waves.
 
         ``wave=0`` runs every wave in sequence, stopping for approval after each.
         ``wave=N`` runs only wave N, which is how you resume after stopping.
         ``yes=True`` skips the approval prompts, for an unattended run.
+
+        ``pilot=N`` runs N complexes at ``pilot_betas`` charge settings each,
+        re-costs the full grid from what it observed, and stops without touching
+        the rest. Its results stay on the volume and count towards the grid, so
+        a pilot is never wasted work.
         """
         jobs = build_job_list(Path(designs), Path(definitions), Path(test_set))
         done = completed_keys()
@@ -722,6 +861,76 @@ if MODAL_AVAILABLE:  # pragma: no cover - requires Modal
         print(f"{len(jobs)} job(s) total, {len(done)} already complete, {len(outstanding)} to run")
         if not outstanding:
             print("nothing to do")
+            return
+
+        if pilot:
+            selected = select_pilot(outstanding, n_complexes=pilot, betas_each=pilot_betas)
+            if not selected:
+                print("no jobs left to pilot")
+                return
+            sizes = sorted(job.total_residues() for job in selected)
+            print(
+                f"\n{'=' * 60}\nPILOT: {len(selected)} job(s) across "
+                f"{len({j.pdb_id for j in selected})} complex(es), "
+                f"{sizes[0]} to {sizes[-1]} residues.\n"
+                "Sized across the distribution, not just the largest, so the median "
+                "extrapolates.\nEach complex runs more than one beta so the MSA search "
+                "is measured cold and warm.\n"
+                "These results count towards the grid; nothing here is thrown away."
+            )
+            pilot_results = list(
+                predict.map([asdict(job) for job in selected], return_exceptions=True)
+            )
+            failures = [r for r in pilot_results if not isinstance(r, dict)]
+            print(f"\n{len(pilot_results) - len(failures)} of {len(pilot_results)} job(s) returned")
+            for result in failures[:5]:
+                print(f"  FAILED: {result!r}"[:300])
+
+            try:
+                projection = extrapolate_from_pilot(
+                    [r for r in pilot_results if isinstance(r, dict)],
+                    n_grid_jobs=len(jobs),
+                    n_grid_complexes=len({j.pdb_id for j in jobs}),
+                )
+            except ValueError as exc:
+                print(f"\nCannot re-cost: {exc}")
+                return
+
+            print(
+                "\n"
+                + json.dumps(
+                    {
+                        k: (round(v, 3) if isinstance(v, float) else v)
+                        for k, v in projection.items()
+                    },
+                    indent=2,
+                )
+            )
+            headroom = budget_usd - projection["estimated_usd"]
+            planned = estimate_cost(len(jobs))["estimated_usd"]
+            print(
+                f"\nplanning assumption said ${planned:.2f}; the pilot says "
+                f"${projection['estimated_usd']:.2f}."
+            )
+            if headroom < 0:
+                wave_one = [j for j in jobs if j.beta in WAVE_BETAS[0]]
+                wave_one_cost = projection["estimated_usd"] * len(wave_one) / max(len(jobs), 1)
+                print(
+                    f"OVER the ${budget_usd:.2f} ceiling by ${-headroom:.2f}. Wave 1 alone "
+                    f"(beta {WAVE_BETAS[0]}, {len(wave_one)} jobs) is about "
+                    f"${wave_one_cost:.2f}.\nRun it with --wave 1. Wave 2 is the part to "
+                    "drop: only 10 to 18 percent of those designs fold at all."
+                )
+            else:
+                print(
+                    f"WITHIN the ${budget_usd:.2f} ceiling, ${headroom:.2f} spare. "
+                    "Launch the grid with --pilot 0."
+                )
+            if not projection["warm_measured"]:
+                print(
+                    "\nNote: no warm job was observed, so this costs every grid job as "
+                    "though it paid\nits own MSA search. The real figure is lower."
+                )
             return
 
         waves = split_into_waves(outstanding, WAVE_BETAS)
