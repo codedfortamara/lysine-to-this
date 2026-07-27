@@ -101,21 +101,33 @@ def test_missing_data_error_quotes_the_contract(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# The skeletons say so
+# No skeletons remain
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("name", ["05_figures.py"])
-def test_skeleton_scripts_refuse_to_pretend(name: str) -> None:
-    """A stub that silently produced an empty table would be worse than a stub.
+def test_no_script_is_still_a_stub() -> None:
+    """Both former skeletons, 04 and 05, are implemented.
 
-    04 was a skeleton and is now implemented, so it is no longer listed here.
-    05 still depends on 04's output and remains a documented stub.
+    Kept as a test rather than deleted because a stub reintroduced later would
+    otherwise pass silently, and a script that raises NotImplementedError is not
+    something the pipeline should ever contain again.
     """
-    result = run_script(name)
+    import pathlib
+
+    for path in sorted(pathlib.Path("scripts").glob("*.py")):
+        source = path.read_text()
+        assert "NotImplementedError" not in source, (
+            f"{path.name} raises NotImplementedError; every script is expected to "
+            "either do its work or fail cleanly on missing input"
+        )
+
+
+def test_figures_script_fails_cleanly_with_no_results(tmp_path: Path) -> None:
+    """05 draws what the analysis produced. With nothing to draw it must say so."""
+    result = run_script("05_figures.py", "--results-dir", str(tmp_path))
     assert result.returncode != 0
-    assert "NotImplementedError" in result.stderr
-    assert "skeleton" in result.stderr
+    assert "no results tables found" in result.stderr
+    assert "invents nothing" in result.stderr
 
 
 def test_analysis_script_fails_cleanly_without_its_input(tmp_path: Path) -> None:

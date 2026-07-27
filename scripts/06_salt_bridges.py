@@ -49,6 +49,11 @@ from interface_charge.statistics import paired_bootstrap_ci
 from interface_charge.structures import StructureError, extract_chain, load_model
 
 
+def beta_tag(beta: float) -> str:
+    """Filename-safe rendering of a charge setting, matching the Modal job keys."""
+    return f"{beta:+.1f}".replace("+", "p").replace("-", "m").replace(".", "_")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -225,8 +230,13 @@ def main(argv: list[str] | None = None) -> int:
             "excludes_zero": composition.excludes_zero,
         }
 
-        table_path = results_dir / "salt_bridges.csv"
-        summary_path = results_dir / "salt_bridges_summary.json"
+        # The charge setting goes in the filename. Without it a run at one beta
+        # silently destroys the run at another, since every other input is the
+        # same. That is not hypothetical: a beta = 0 run overwrote the beta = 3
+        # results here, and the loss was invisible because the replacement was a
+        # perfectly valid table for a different question.
+        table_path = results_dir / f"salt_bridges_beta{beta_tag(args.beta)}.csv"
+        summary_path = results_dir / f"salt_bridges_beta{beta_tag(args.beta)}_summary.json"
         table.to_csv(table_path, index=False)
         summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True, default=str) + "\n")
 

@@ -36,9 +36,12 @@ complex numbers load-bearing rather than caveated.
 
 ## Status
 
-The input data has not arrived yet. Everything here is built against the
+The data has arrived and the pipeline has run on it: 55 two-chain complexes,
+275 designs across five charge settings. Everything is built against the
 documented contract in [`data/README.md`](data/README.md) and validated on a
-committed structural fixture.
+committed structural fixture as well as on the real set.
+
+The AlphaFold2-Multimer refolding run is the one outstanding piece.
 
 | Component | State |
 | --- | --- |
@@ -48,12 +51,18 @@ committed structural fixture.
 | `charge.py` both charge definitions, partitioning | implemented, tested |
 | `complementarity.py` | implemented, tested |
 | `provenance.py` run manifests | implemented, tested |
-| `scripts/00` to `scripts/03` | implemented, run end to end on the fixture |
-| `scripts/04`, `scripts/05` | documented skeletons, see "Deliberately unfinished" |
-| `modal_app/af2_multimer.py` | implemented, `--dry-run` works without Modal installed |
+| `saltbridge.py`, `statistics.py`, `uversky.py`, `paired.py` | implemented, tested |
+| `scripts/00` to `scripts/05` | implemented, run end to end on real data |
+| `scripts/06_salt_bridges.py` | implemented, one output set per beta |
+| `scripts/07_burial_control.py` | implemented, rSASA-matched permutation null |
+| `scripts/08_uversky.py` | implemented, within-beta test against folding |
+| `scripts/09_partner_ablation.py` | implemented, the causal control for question 1 |
+| `scripts/10_regenerate_designs.py` | implemented, seeded, `--isolated-chain` for the ablation |
+| `scripts/11_import_upstream_designs.py` | implemented, chain matching by sequence identity |
+| `modal_app/af2_multimer.py` | implemented, `--dry-run` and `--pilot` work; AF2 run outstanding |
 
-No result, figure or table in this repository is derived from real design data,
-because there is not any yet. Nothing is committed to `results/` or `figures/`.
+Nothing is committed to `results/` or `figures/`. Every number in this README is
+reproduced by running the scripts against the data contract.
 
 ## Environment blockers found while building this
 
@@ -77,32 +86,27 @@ run:
    --chains A D`; the tests pick it up automatically and will then run against
    both.
 
-## Open questions for Mohammed
+## Questions that were open, and how they were answered
 
-These block or change the analysis. The first one blocks it outright.
+These blocked the analysis. All four are now settled, recorded here because the
+answers constrain how the results must be read.
 
 1. **Which chains were redesigned and which were held fixed?**
-   The entire partition analysis rests on this. "Interface charge" means the
-   charge of the *designed* chain's interface residues, and if the designed and
-   fixed chains are swapped the trend inverts. `designs.csv` needs
-   `designed_chain` and `fixed_chain` populated per row, using the deposited
-   author chain identifiers, not chain indices. If more than one chain was
-   redesigned per complex, say so and the contract will take a comma separated
-   list (it already parses one).
+   ProteinMPNN was called with no chain mask, so *every* chain was redesigned.
+   `scripts/11_import_upstream_designs.py` recovers the pairing by sequence
+   identity against the native, and `interface.choose_contacting_partner` picks
+   the partner by contact rather than by size. Choosing by size had picked the
+   wrong partner for 36 of 55 complexes and gave 11 an empty interface.
 2. **Which pKa set produced `net_charge_reported`?**
-   EMBOSS and Bjellqvist disagree by roughly 0.5 to 1.5 charge units on a
-   hundred-residue chain. `scripts/02_partition_charge.py` reconciles our
-   computed charge against that column and reports which combination of
-   definition and pKa set reproduces it, so this is diagnosable rather than
-   blocking, but knowing the answer saves a round trip. If the column came from
-   Biopython `ProtParam`, it is Bjellqvist.
-3. **Which `beta` grid and how many replicates per `(pdb_id, beta)`?**
-   This sets the GPU bill directly. See "Modal budget" below.
-4. **Are the 26 RCSB complexes all two-chain?**
-   The interface analysis is defined between a pair of chains. Any complex with
-   three or more has to be split into named pairs, and which pair is the
-   biologically relevant one is a judgement call that has to be recorded rather
-   than defaulted.
+   Neither. `scripts/02_partition_charge.py` reconciles seven candidate
+   definitions and the simple integer count, (K+R) minus (D+E), reproduces the
+   reported column exactly, at 100 percent with zero error.
+3. **Which `beta` grid and how many replicates?**
+   Five settings, -3, -1.5, 0, +1.5, +3, one replicate each. 275 designs.
+4. **Are the complexes all two-chain?**
+   The set is 55 pairs after excluding five complexes where ProteinMPNN and the
+   structure loader disagree on residue count. That exclusion was inherited from
+   upstream and is confirmed independently here rather than assumed.
 
 ## Data contract
 
@@ -263,21 +267,22 @@ trust. Figures carry it in their file metadata and in a small footer stamp.
 manifest recorded against a dirty working tree is marked as not
 publication-ready, because it cannot be reproduced from its commit.
 
-## Deliberately unfinished
+## Outstanding
 
-`scripts/04_join_and_analyse.py` and `scripts/05_figures.py` are documented
-skeletons. They describe the intended tables and figures in their docstrings and
-raise `NotImplementedError` with that description rather than pretending to
-work. The reason is that the exact shape of the join depends on what the AF2
-output actually contains, and writing the aggregation before seeing the data
-would mean rewriting it afterwards. The analysis they will perform is specified;
-the code is not written.
+The AlphaFold2-Multimer refolding run. `modal_app/af2_multimer.py --dry-run`
+costs it and `--pilot N` measures it on a handful of jobs before committing the
+budget. Everything else in the pipeline runs on real data.
+
+Script 04 reports an `af2` block saying the metrics are absent rather than
+omitting the section, and script 05 skips the figures that need them rather than
+drawing an empty panel. Question 1, where the charge lands, is complete without
+them; question 2, whether the interface survives, needs them.
 
 ## Merging into the upstream repository
 
 This project is laid out to drop into the collaborator's repository as a single
 self-contained subdirectory, `rcsb_interface/`, with no file collisions and no
-changes to anything already there. Verified: 45 files placed, zero collisions,
+changes to anything already there. Verified: 53 files placed, zero collisions,
 and the full test suite passes when run from inside the upstream checkout.
 
 Nesting works without code changes because every path in this project is derived

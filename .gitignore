@@ -1,10 +1,8 @@
 # Data. Nothing under data/ is committed except the documentation and the
 # directory markers. Native structures are re-fetchable from the RCSB by
 # pdb_id, and the collaborator's design tables are not ours to redistribute.
-data/raw/*
-data/native/*
-data/interim/*
-data/ablation/*
+data/*
+!data/README.md
 !data/**/.gitkeep
 
 # Results and figures are build products of a specific run. They are
