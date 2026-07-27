@@ -810,6 +810,39 @@ def msa_plan(job: Job) -> dict[str, str]:
     return modes
 
 
+def searches_required(jobs: list[Job]) -> list[tuple[str, str, str]]:
+    """Every distinct homology search the grid needs, as (pdb_id, chain, sequence).
+
+    One entry per native chain per complex, not per job. The partner is held at
+    its native sequence at every charge setting, so all five betas of a complex
+    want the identical alignment: on this grid that is 55 searches rather than
+    275.
+
+    Exists as a free function so that the prefetch can be planned, counted and
+    tested without Modal installed and without a network.
+
+    Raises if the same (complex, chain) appears with two different sequences.
+    Silently caching one of them would give some jobs an alignment built from
+    the wrong sequence, which AlphaFold would happily consume.
+    """
+    seen: dict[tuple[str, str], str] = {}
+    for job in jobs:
+        for chain_id, mode in msa_plan(job).items():
+            if mode != "msa":
+                continue
+            key = (job.pdb_id, chain_id)
+            sequence = job.chains[chain_id]
+            previous = seen.setdefault(key, sequence)
+            if previous != sequence:
+                raise ValueError(
+                    f"{job.pdb_id} chain {chain_id} appears with two different "
+                    f"native sequences ({len(previous)} and {len(sequence)} "
+                    "residues). One cache entry cannot serve both, and reusing "
+                    "either would align some jobs against the wrong sequence."
+                )
+    return [(pdb_id, chain_id, seq) for (pdb_id, chain_id), seq in sorted(seen.items())]
+
+
 def pairing_is_meaningful(modes: dict[str, str]) -> bool:
     """Can the chains' alignments be paired by organism?
 
@@ -865,7 +898,7 @@ if MODAL_AVAILABLE:  # pragma: no cover - requires Modal
         max_containers=PARAMS.max_containers,
         retries=modal.Retries(max_retries=1, backoff_coefficient=2.0),
     )
-    def predict(job_payload: dict) -> dict:
+    def predict(job_payload: dict, allow_msa_search: bool = False) -> dict:
         """Refold one complex and return interface-resolved metrics.
 
         Writes the raw predicted PDB and a metrics JSON to the results volume
@@ -892,7 +925,21 @@ if MODAL_AVAILABLE:  # pragma: no cover - requires Modal
         query_sequence = ":".join(job.chains[c] for c in ordered)
 
         modes = msa_plan(job)
-        a3m = build_mixed_a3m(job, ordered, modes, cache_dir=Path(RESULTS_PATH) / "msa_cache")
+        msa_started = time.time()
+        a3m = build_mixed_a3m(
+            job,
+            ordered,
+            modes,
+            cache_dir=Path(RESULTS_PATH) / "msa_cache",
+            # A cache miss must not turn into an MMseqs2 search here. The search
+            # is an HTTP poll against a free shared server that queues under
+            # load, and this container is an A100. That is what the two-hour
+            # timeouts in the first pilot were: jobs sitting in a queue, billed
+            # at GPU rates, until the timeout killed them with nothing produced.
+            # Run ``prefetch`` first; it does the identical searches on CPU.
+            allow_search=allow_msa_search,
+        )
+        msa_seconds = time.time() - msa_started
         require_parseable_complex_a3m(a3m, [len(job.chains[c]) for c in ordered])
 
         colabfold_run(
@@ -941,6 +988,13 @@ if MODAL_AVAILABLE:  # pragma: no cover - requires Modal
                 "replicate": job.replicate,
                 "key": job.key,
                 "wall_clock_s": time.time() - started,
+                # Kept apart from wall clock deliberately. In the first pilot
+                # these were the same number and there was no way to see it: the
+                # alignment wait and the folding were both "the job took two
+                # hours". Recorded separately, a prefetched run shows
+                # msa_seconds near zero and the rest is real compute.
+                "msa_seconds": round(msa_seconds, 1),
+                "fold_seconds": round(time.time() - started - msa_seconds, 1),
                 "msa_mode": job.msa_mode,
                 "msa_paired": pairing_is_meaningful(modes),
                 "num_recycles": PARAMS.num_recycles,
@@ -955,7 +1009,11 @@ if MODAL_AVAILABLE:  # pragma: no cover - requires Modal
         return metrics
 
     def build_mixed_a3m(
-        job: Job, chain_order: list[str], modes: dict[str, str], cache_dir: Path
+        job: Job,
+        chain_order: list[str],
+        modes: dict[str, str],
+        cache_dir: Path,
+        allow_search: bool = True,
     ) -> str:
         """Assemble one alignment where some chains have homologues and some do not.
 
@@ -995,6 +1053,18 @@ if MODAL_AVAILABLE:  # pragma: no cover - requires Modal
             if cached.is_file():
                 unpaired.append(cached.read_text())
                 continue
+
+            if not allow_search:
+                raise RuntimeError(
+                    f"{job.key}: no cached alignment for {job.pdb_id} chain "
+                    f"{chain_id}, and searching is disabled on the GPU path.\n"
+                    "MMseqs2 here is an HTTP poll against a free shared server "
+                    "that queues for tens of minutes under load, and this "
+                    "container is billed at GPU rates for the whole wait. Fill "
+                    "the cache on CPU first:\n\n"
+                    "  modal run modal_app/af2_multimer.py::prefetch\n\n"
+                    "Pass --allow-msa-search to override, knowing the cost."
+                )
 
             result = run_mmseqs2(
                 [sequence],
@@ -1047,6 +1117,67 @@ if MODAL_AVAILABLE:  # pragma: no cover - requires Modal
             query_seqs_unique=[job.chains[c] for c in chain_order],
             query_seqs_cardinality=[1] * len(chain_order),
         )
+
+    @app.function(
+        image=image,
+        volumes={RESULTS_PATH: results_volume},
+        timeout=TIMEOUT_S,
+        # Deliberately low. The other side of this is api.colabfold.com, which
+        # is free, shared and run by people who did not agree to absorb this
+        # grid. Twenty containers submitting at once is also self-defeating:
+        # the server throttles and every one of them waits longer.
+        max_containers=4,
+        retries=modal.Retries(max_retries=2, backoff_coefficient=2.0),
+    )
+    def fetch_msa(pdb_id: str, chain_id: str, sequence: str) -> dict:
+        """Search MMseqs2 for one native chain and cache the alignment. CPU only.
+
+        This is the same search ``predict`` used to do inline, moved off the
+        GPU. Nothing about the alignment changes: same server, same flags, same
+        cache path, so a run with a warm cache is identical to one without,
+        minus the bill.
+
+        The bill is the point. A CPU container costs a few cents an hour and an
+        A100 costs two dollars, and the wait is the same wait either way.
+        """
+        import time
+
+        from colabfold.colabfold import run_mmseqs2
+
+        cache_dir = Path(RESULTS_PATH) / "msa_cache"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        cached = cache_dir / f"{pdb_id}_{chain_id}.a3m"
+
+        results_volume.reload()
+        if cached.is_file():
+            return {"pdb_id": pdb_id, "chain_id": chain_id, "cached": True, "seconds": 0.0}
+
+        started = time.time()
+        result = run_mmseqs2(
+            [sequence],
+            str(cache_dir / f"mmseqs_{pdb_id}_{chain_id}"),
+            use_env=True,
+            use_filter=True,
+            use_templates=False,
+            use_pairing=False,
+            user_agent=MMSEQS_USER_AGENT,
+        )
+        lines = result[0] if isinstance(result, list | tuple) else result
+        if not lines or ">" not in lines:
+            raise RuntimeError(
+                f"MMseqs2 returned no alignment for {pdb_id} chain {chain_id}. "
+                "Refusing to write an empty cache entry, which would send every "
+                "beta of this complex to the GPU with a silently degraded MSA."
+            )
+        cached.write_text(lines)
+        results_volume.commit()
+        return {
+            "pdb_id": pdb_id,
+            "chain_id": chain_id,
+            "cached": False,
+            "seconds": round(time.time() - started, 1),
+            "depth": lines.count(">"),
+        }
 
     @app.function(
         image=image,
@@ -1108,8 +1239,109 @@ if MODAL_AVAILABLE:  # pragma: no cover - requires Modal
                 f"downloaded {result['n_param_files']} parameter file(s), "
                 f"{result['total_gb']} GB, in {result['seconds']}s"
             )
-        print("\nnow run the pilot:")
+        print("\nnow fill the alignment cache, also on CPU:")
+        print("  modal run modal_app/af2_multimer.py::prefetch")
+
+    @app.local_entrypoint()
+    def prefetch(
+        designs: str = "data/raw/designs.csv",
+        test_set: str = "data/raw/test_set.csv",
+        definitions: str = "results/interface_definitions.json",
+    ) -> None:
+        """Fill the alignment cache on CPU, before any GPU is allocated.
+
+        This is a prerequisite of ``run``, not an optimisation. The first pilot
+        did these searches inside the A100 containers and three of eight jobs
+        hit the two-hour timeout without folding anything, because
+        api.colabfold.com queues under load and ``run_mmseqs2`` polls until it
+        is served. The searches are identical here; only the machine underneath
+        them is cheap.
+
+        One search per native chain per complex, not per job, so the grid needs
+        55 of them rather than 275.
+        """
+        jobs = build_job_list(Path(designs), Path(definitions), Path(test_set))
+        wanted = searches_required(jobs)
+        print(f"{len(jobs)} job(s) over {len({j.pdb_id for j in jobs})} complex(es)")
+        print(f"{len(wanted)} distinct alignment(s) needed, one per native chain per complex")
+        print("running on CPU, four at a time, to stay polite to a free shared server\n")
+
+        results = list(fetch_msa.starmap(wanted, order_outputs=False))
+
+        already = [r for r in results if r["cached"]]
+        fetched = [r for r in results if not r["cached"]]
+        print(f"\n{len(already)} already cached, {len(fetched)} newly searched")
+        if fetched:
+            waits = sorted(r["seconds"] for r in fetched)
+            depths = sorted(r["depth"] for r in fetched)
+            print(
+                f"search wait: median {waits[len(waits) // 2] / 60:.1f} min, "
+                f"max {waits[-1] / 60:.1f} min"
+            )
+            print(f"alignment depth: median {depths[len(depths) // 2]}, min {depths[0]}")
+            print(
+                "\nAll of that wait would have been billed at the GPU rate if it "
+                "had happened inside predict."
+            )
+        print("\nnow the grid can run with no network in the GPU containers:")
         print("  modal run modal_app/af2_multimer.py::run --pilot 4")
+
+    @app.local_entrypoint()
+    def timings() -> None:
+        """Report what the completed jobs actually cost, and re-cost the grid.
+
+        The planning figure in ``config.AF2Params`` is an assumption and has
+        always said so. This replaces it with the measurement, taken from the
+        jobs already banked on the results volume, and separates the alignment
+        wait from the folding so that a pre-prefetch job is not mistaken for a
+        slow one.
+        """
+        records = completed_metrics()
+        if not records:
+            print("no completed jobs on the results volume yet, so nothing to measure")
+            return
+
+        def stat(values: list[float]) -> str:
+            values = sorted(values)
+            return (
+                f"median {values[len(values) // 2] / 60:.1f} min, "
+                f"min {values[0] / 60:.1f}, max {values[-1] / 60:.1f}"
+            )
+
+        wall = [float(r["wall_clock_s"]) for r in records if "wall_clock_s" in r]
+        # Older records predate the split and carry no msa_seconds. They are
+        # reported as unattributed rather than folded into the fold time, which
+        # would understate the saving the prefetch makes.
+        split = [r for r in records if "msa_seconds" in r]
+
+        print(f"{len(records)} completed job(s) on {PARAMS.results_volume}\n")
+        print(f"wall clock:  {stat(wall)}")
+        if split:
+            print(f"  alignment: {stat([float(r['msa_seconds']) for r in split])}")
+            print(f"  folding:   {stat([float(r['fold_seconds']) for r in split])}")
+            basis = sorted(float(r["fold_seconds"]) for r in split)
+        else:
+            print(
+                f"  ({len(records)} record(s) predate the alignment/folding split, "
+                "so their wall clock still includes the MMseqs2 wait)"
+            )
+            basis = sorted(wall)
+
+        minutes = basis[len(basis) // 2] / 60.0
+        print(f"\nre-costing the grid at the observed median of {minutes:.1f} min per job")
+        print("(folding only: with the cache warm, the alignment wait is off the GPU)\n")
+
+        jobs = build_job_list(
+            Path("data/raw/designs.csv"),
+            Path("results/interface_definitions.json"),
+            Path("data/raw/test_set.csv"),
+        )
+        outstanding = [j for j in jobs if j.key not in completed_keys()]
+        measured = replace(PARAMS, estimated_minutes_per_job=minutes, msa_overhead_minutes=0.0)
+        estimate = estimate_cost(len(outstanding), params=measured)
+        print(f"{len(outstanding)} job(s) outstanding")
+        print(f"estimated ${estimate['estimated_usd']:.2f} on {estimate['gpu_type']}")
+        print(f"estimated {estimate['estimated_wall_clock_hours']:.1f} h wall clock")
 
     @app.local_entrypoint()
     def run(
@@ -1126,6 +1358,7 @@ if MODAL_AVAILABLE:  # pragma: no cover - requires Modal
         min_residues: int = 0,
         max_residues: int = 0,
         only_betas: str = "",
+        allow_msa_search: bool = False,
     ) -> None:
         """Launch the grid in waves, largest complexes first, gated between waves.
 
@@ -1153,6 +1386,31 @@ if MODAL_AVAILABLE:  # pragma: no cover - requires Modal
             return
 
         jobs = build_job_list(Path(designs), Path(definitions), Path(test_set))
+
+        # Checked here for the same reason the weights are: a cold cache does
+        # not fail a job, it makes every job sit in an MMseqs2 queue with an
+        # A100 attached to it. That is what the first pilot did, and it is the
+        # single most expensive way this run can go wrong.
+        if not allow_msa_search:
+            missing = [
+                (pdb_id, chain_id)
+                for pdb_id, chain_id, _ in searches_required(jobs)
+                if f"{pdb_id}_{chain_id}.a3m" not in cached_alignments()
+            ]
+            if missing:
+                shown = ", ".join(f"{p} {c}" for p, c in missing[:6])
+                more = f" and {len(missing) - 6} more" if len(missing) > 6 else ""
+                print(
+                    f"\n{len(missing)} of {len(searches_required(jobs))} alignment(s) "
+                    f"are not cached: {shown}{more}.\n\n"
+                    "Fetch them on CPU first. It is the same search, on a machine "
+                    "that costs cents\nrather than dollars an hour:\n\n"
+                    "  modal run modal_app/af2_multimer.py::prefetch\n\n"
+                    "Pass --allow-msa-search to run anyway and pay GPU rates for "
+                    "the wait."
+                )
+                return
+
         done = completed_keys()
         outstanding = [job for job in jobs if job.key not in done]
 
@@ -1216,7 +1474,11 @@ if MODAL_AVAILABLE:  # pragma: no cover - requires Modal
                 "These results count towards the grid; nothing here is thrown away."
             )
             pilot_results = list(
-                predict.map([asdict(job) for job in selected], return_exceptions=True)
+                predict.map(
+                    [asdict(job) for job in selected],
+                    kwargs={"allow_msa_search": allow_msa_search},
+                    return_exceptions=True,
+                )
             )
             failures = [r for r in pilot_results if not isinstance(r, dict)]
             print(f"\n{len(pilot_results) - len(failures)} of {len(pilot_results)} job(s) returned")
@@ -1308,7 +1570,11 @@ if MODAL_AVAILABLE:  # pragma: no cover - requires Modal
 
                 print(f"\n  batch {batch_number}: {len(batch)} job(s) | {guard.status()}")
                 batch_results = list(
-                    predict.map([asdict(job) for job in batch], return_exceptions=True)
+                    predict.map(
+                        [asdict(job) for job in batch],
+                        kwargs={"allow_msa_search": allow_msa_search},
+                        return_exceptions=True,
+                    )
                 )
                 for result in batch_results:
                     if isinstance(result, dict) and result.get("wall_clock_s") is not None:
@@ -1396,11 +1662,39 @@ if MODAL_AVAILABLE:  # pragma: no cover - requires Modal
             keys.add(name)
         return keys
 
+    def cached_alignments() -> set[str]:
+        """Alignment file names already sitting in the cache on the volume."""
+        try:
+            entries = results_volume.listdir("/msa_cache")
+        except VOLUME_MISSING:
+            return set()
+        return {Path(entry.path).name for entry in entries}
+
+    def completed_metrics() -> list[dict]:
+        """Read back the metrics of every completed job, for measurement only.
+
+        Kept separate from ``completed_keys`` because it downloads a file per
+        job rather than listing directories, which is fine for reporting and
+        wasteful in the launcher's hot path.
+        """
+        records: list[dict] = []
+        for key in sorted(completed_keys()):
+            try:
+                blob = b"".join(results_volume.read_file(f"{key}/metrics.json"))
+            except VOLUME_MISSING:
+                continue
+            records.append(json.loads(blob))
+        return records
+
 else:  # pragma: no cover
 
     def completed_keys() -> set[str]:
         """Without Modal installed there is nothing to interrogate."""
         return set()
+
+    def completed_metrics() -> list[dict]:
+        """Likewise."""
+        return []
 
 
 # ---------------------------------------------------------------------------
