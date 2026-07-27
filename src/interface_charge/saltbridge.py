@@ -61,6 +61,7 @@ __all__ = [
     "SaltBridgeResult",
     "compare_salt_bridge_definitions",
     "count_salt_bridges",
+    "count_salt_bridges_threaded",
 ]
 
 #: Side-chain nitrogen atoms carrying the positive charge.
@@ -250,6 +251,99 @@ def count_salt_bridges(
     return SaltBridgeResult(
         definition=definition,
         cutoff_a=cutoff,
+        n_bridges=len(pairs),
+        n_cationic_residues=n_cationic,
+        n_anionic_residues=n_anionic,
+        n_charged_residues=n_cationic + n_anionic,
+        n_opportunities=n_cationic * n_anionic,
+        n_engaged_residues=len(engaged),
+        include_histidine=params.include_histidine,
+        scope=scope,
+    )
+
+
+def count_salt_bridges_threaded(
+    model: Model,
+    extract_a: ChainExtract,
+    extract_b: ChainExtract,
+    params: SaltBridgeParams,
+    structure_params: StructureParams,
+    cross_chain_only: bool = False,
+) -> SaltBridgeResult:
+    """Cbeta-proxy salt bridges for sequences threaded onto a fixed backbone.
+
+    Why only the proxy definition is available here
+    -----------------------------------------------
+    The geometric definition measures between charged-group heavy atoms, and a
+    threaded design does not have them: replacing a native aspartate with a
+    designed lysine changes which side-chain atoms exist and where they point,
+    and recovering that would require side-chain repacking. Cbeta sits on the
+    backbone side of the first side-chain bond, so its position is unchanged by
+    the substitution and the proxy remains computable.
+
+    That is a real constraint rather than an oversight, and it is why a
+    threaded-design analysis is limited to the coarser definition. What it does
+    **not** excuse is comparing raw counts between sequences of different charge
+    composition, which is what the normalised fields on the result exist for.
+
+    Charge is taken from the ``sequence`` of each extract, so passing a design's
+    sequence via :meth:`ChainExtract.with_sequence` measures that design on the
+    native backbone.
+    """
+    cationic = set("KRH") if params.include_histidine else set("KR")
+    anionic = set("DE")
+
+    atoms: list = []
+    owner: dict[int, ResidueId] = {}
+    sign: dict[ResidueId, int] = {}
+    clone = submodel(model, (extract_a.chain_id, extract_b.chain_id), structure_params)
+
+    by_chain = {extract_a.chain_id: extract_a, extract_b.chain_id: extract_b}
+    for chain in clone:
+        extract = by_chain.get(chain.id)
+        if extract is None:
+            continue
+        for res in chain:
+            rid = residue_id(res, chain.id)
+            position = extract.index_of.get(rid)
+            if position is None:
+                continue
+            aa = extract.sequence[position]
+            if aa in cationic:
+                sign[rid] = 1
+            elif aa in anionic:
+                sign[rid] = -1
+            else:
+                continue
+            for atom in res:
+                if atom.get_id() != "CB":
+                    continue
+                if atom.get_altloc() not in structure_params.accepted_altlocs:
+                    continue
+                owner[id(atom)] = rid
+                atoms.append(atom)
+
+    cations = [a for a in atoms if sign[owner[id(a)]] > 0]
+    anions = [a for a in atoms if sign[owner[id(a)]] < 0]
+    n_cationic = sum(1 for v in sign.values() if v > 0)
+    n_anionic = sum(1 for v in sign.values() if v < 0)
+    scope = "cross_chain" if cross_chain_only else "all"
+
+    pairs: set[tuple[ResidueId, ResidueId]] = set()
+    if cations and anions:
+        search = NeighborSearch(anions)
+        for atom in cations:
+            cation_rid = owner[id(atom)]
+            for other in search.search(atom.get_coord(), params.proxy_cbeta_cutoff_a, level="A"):
+                anion_rid = owner[id(other)]
+                if cross_chain_only and cation_rid.chain == anion_rid.chain:
+                    continue
+                pairs.add((cation_rid, anion_rid))
+
+    engaged = {rid for pair in pairs for rid in pair}
+    return SaltBridgeResult(
+        definition="cbeta_proxy",
+        cutoff_a=params.proxy_cbeta_cutoff_a,
         n_bridges=len(pairs),
         n_cationic_residues=n_cationic,
         n_anionic_residues=n_anionic,

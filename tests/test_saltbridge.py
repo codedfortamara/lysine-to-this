@@ -254,3 +254,80 @@ def test_summarise_reports_both_raw_and_normalised(model, structure_case, config
 
 def test_summarise_of_nothing_is_empty_not_an_error() -> None:
     assert summarise([]) == {}
+
+
+# ---------------------------------------------------------------------------
+# Threaded designs
+# ---------------------------------------------------------------------------
+
+
+def test_threaded_counting_reproduces_the_native_sequence(model, extracts, config) -> None:
+    """Threading a chain's own sequence must reproduce its Cbeta-proxy count."""
+    from interface_charge.saltbridge import count_salt_bridges_threaded
+
+    extract_a, extract_b = extracts
+    threaded = count_salt_bridges_threaded(
+        model, extract_a, extract_b, config.salt_bridge, config.structure
+    )
+    direct = count_salt_bridges(
+        model,
+        (extract_a.chain_id, extract_b.chain_id),
+        config.salt_bridge,
+        config.structure,
+        "cbeta_proxy",
+    )
+    assert threaded.n_charged_residues == direct.n_charged_residues
+    assert threaded.n_bridges == direct.n_bridges
+
+
+def test_threading_a_neutral_sequence_removes_every_bridge(model, extracts, config) -> None:
+    from interface_charge.saltbridge import count_salt_bridges_threaded
+
+    extract_a, extract_b = extracts
+    result = count_salt_bridges_threaded(
+        model,
+        extract_a.with_sequence("A" * len(extract_a.sequence)),
+        extract_b.with_sequence("A" * len(extract_b.sequence)),
+        config.salt_bridge,
+        config.structure,
+    )
+    assert result.n_charged_residues == 0
+    assert result.n_bridges == 0
+
+
+def test_threading_more_charge_raises_the_raw_count(model, extracts, config) -> None:
+    """The confound this module exists to expose, demonstrated directly.
+
+    Making a sequence uniformly charged raises the raw bridge count without any
+    claim that the charge is better placed, which is why a raw count cannot
+    support a statement about placement.
+    """
+    from interface_charge.saltbridge import count_salt_bridges_threaded
+
+    extract_a, extract_b = extracts
+    alternating = "".join("K" if i % 2 else "D" for i in range(len(extract_a.sequence)))
+    charged = count_salt_bridges_threaded(
+        model,
+        extract_a.with_sequence(alternating),
+        extract_b,
+        config.salt_bridge,
+        config.structure,
+    )
+    native = count_salt_bridges_threaded(
+        model, extract_a, extract_b, config.salt_bridge, config.structure
+    )
+    assert charged.n_charged_residues > native.n_charged_residues
+    assert charged.n_bridges > native.n_bridges
+
+
+def test_threaded_cross_chain_is_a_subset(model, extracts, config) -> None:
+    from interface_charge.saltbridge import count_salt_bridges_threaded
+
+    extract_a, extract_b = extracts
+    every = count_salt_bridges_threaded(
+        model, extract_a, extract_b, config.salt_bridge, config.structure, cross_chain_only=False
+    )
+    across = count_salt_bridges_threaded(
+        model, extract_a, extract_b, config.salt_bridge, config.structure, cross_chain_only=True
+    )
+    assert across.n_bridges <= every.n_bridges
