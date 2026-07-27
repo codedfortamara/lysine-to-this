@@ -169,8 +169,12 @@ job in the grid.
 ### Pilot first
 
 ```
-modal run modal_app/af2_multimer.py --pilot 4
+modal run modal_app/af2_multimer.py::setup       # once: fills the weights volume
+modal run modal_app/af2_multimer.py::run --pilot 4
 ```
+
+Both entrypoints are named explicitly. There is more than one, so Modal will not
+guess.
 
 This runs four complexes at two charge settings each, eight jobs and roughly
 four dollars, then re-costs the full grid from what it observed and stops. The

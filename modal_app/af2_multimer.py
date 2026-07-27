@@ -1008,7 +1008,7 @@ if MODAL_AVAILABLE:  # pragma: no cover - requires Modal
                 f"{result['total_gb']} GB, in {result['seconds']}s"
             )
         print("\nnow run the pilot:")
-        print("  modal run modal_app/af2_multimer.py --pilot 4")
+        print("  modal run modal_app/af2_multimer.py::run --pilot 4")
 
     @app.local_entrypoint()
     def run(
@@ -1610,7 +1610,7 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         print(
             "To launch, use Modal's own entrypoint so that the app context is set up:\n"
-            "  modal run modal_app/af2_multimer.py\n"
+            "  modal run modal_app/af2_multimer.py::run\n"
             "This CLI exists for --dry-run.",
             file=sys.stderr,
         )
