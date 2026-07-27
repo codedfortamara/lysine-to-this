@@ -7,7 +7,7 @@ name = "interface-charge-rcsb"
 version = "0.1.0"
 description = "Interface-resolved charge partitioning and complex-aware refolding for charge-controlled ProteinMPNN designs on RCSB complexes"
 readme = "README.md"
-requires-python = ">=3.11,<3.14"
+requires-python = ">=3.11,<3.15"
 license = { text = "MIT" }
 authors = [{ name = "Tamara Dinneen" }]
 keywords = ["protein design", "electrostatics", "protein-protein interface", "ProteinMPNN", "AlphaFold2-Multimer"]
@@ -20,6 +20,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# torch is needed ONLY by scripts/10_regenerate_designs.py. The analysis path
+# (import, interfaces, charge partition, complementarity) does not import it, so
+# a Python version without torch wheels still runs everything that matters.
+regenerate = ["torch>=2.0"]
+
 # freesasa is a compiled C extension whose Windows wheels are unreliable, and a
 # source build there needs an MSVC toolchain. It is genuinely optional: the
 # default SASA backend is Biopython's Shrake-Rupley, and interface.py imports
