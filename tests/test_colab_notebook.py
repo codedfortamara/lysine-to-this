@@ -135,8 +135,26 @@ def test_the_msa_treatment_matches_modal(notebook: dict) -> None:
     """Same mixed-mode policy, or the two backends answer different questions."""
     source = source_of(notebook)
     assert '"single_sequence"' in source
-    assert "paired_msa=None" in source
     assert "use_pairing=False" in source
+
+
+def test_the_paired_block_carries_the_query(notebook: dict) -> None:
+    """paired_msa=None leaves no row spanning both chains, and AF2 refuses it.
+
+    Verified against ColabFold's own unserialize_msa: with None the paired MSA
+    comes back at depth [0, 0] and make_msa_features raises "MSA 0 must contain
+    at least one sequence". With the query paired to itself it is depth [1, 1]
+    and the partner homologues stay in the unpaired block where they belong.
+
+    Colab would have hit this identically, so the notebook needs the same fix,
+    not a different one.
+    """
+    source = source_of(notebook)
+    assert "paired_msa=paired" in source, (
+        "the notebook must pass a paired block; None fails inside AlphaFold-Multimer"
+    )
+    assert "paired = [" in source
+    assert "101 + i" in source, "the paired rows need the 101, 102 headers ColabFold pairs on"
 
 
 def test_the_msa_cache_is_keyed_by_complex_not_by_job(notebook: dict) -> None:

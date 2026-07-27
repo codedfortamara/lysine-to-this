@@ -970,15 +970,33 @@ if MODAL_AVAILABLE:  # pragma: no cover - requires Modal
             results_volume.commit()
             unpaired.append(lines)
 
-        # No paired block, ever, on this job set. Pairing matches homologues by
-        # organism across chains, and a design belongs to no organism, so there
-        # is nothing to pair it to. Every job here has exactly one designed
-        # chain, so pairing_is_meaningful is uniformly false; it is recorded in
-        # the metrics rather than branched on, because the limitation belongs in
-        # the results table where it can be reported.
+        # The paired block contains the query and nothing else.
+        #
+        # No homologue can be paired here: pairing matches homologues by
+        # organism across chains, and a design belongs to no organism. But
+        # passing paired_msa=None produces an alignment with no row spanning
+        # both chains at all, and AlphaFold-Multimer's feature builder rejects
+        # that outright:
+        #
+        #     ValueError: MSA 0 must contain at least one sequence
+        #
+        # ColabFold does the same thing for homooligomers, pairing the query
+        # with itself. So the paired block is depth one, carrying the query row
+        # the multimer path requires and no co-evolutionary information, which
+        # is exactly the limitation already documented. The partner's homologues
+        # are still in the unpaired block where they belong.
+        #
+        # pair_sequences joins these line by line and rewrites ">" as a tab for
+        # every chain after the first, which is what produces the ">101\t102"
+        # header that marks a row as paired.
+        paired = [
+            f">{101 + index}\n{job.chains[chain_id]}\n"
+            for index, chain_id in enumerate(chain_order)
+        ]
+
         return msa_to_str(
             unpaired_msa=unpaired,
-            paired_msa=None,
+            paired_msa=paired,
             query_seqs_unique=[job.chains[c] for c in chain_order],
             query_seqs_cardinality=[1] * len(chain_order),
         )

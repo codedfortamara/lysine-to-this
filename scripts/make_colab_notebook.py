@@ -277,10 +277,16 @@ def build_mixed_a3m(job, ordered):
             raise RuntimeError(f"MMseqs2 returned no alignment for {job['pdb_id']} {chain_id}")
         cached.write_text(lines)
         unpaired.append(lines)
-    # No paired block: pairing matches homologues by organism and a design has none.
+    # The paired block is the query and nothing else. No homologue can be paired
+    # (pairing matches by organism, and a design has none), but passing None
+    # leaves no row spanning both chains and AlphaFold-Multimer refuses it with
+    # "MSA 0 must contain at least one sequence". ColabFold does the same for
+    # homooligomers. Depth one: the row the multimer path needs, no
+    # co-evolutionary information.
+    paired = [f">{101 + i}\\n{job['chains'][c]}\\n" for i, c in enumerate(ordered)]
     return msa_to_str(
         unpaired_msa=unpaired,
-        paired_msa=None,
+        paired_msa=paired,
         query_seqs_unique=[job["chains"][c] for c in ordered],
         query_seqs_cardinality=[1] * len(ordered),
     )
