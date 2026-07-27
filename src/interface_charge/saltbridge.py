@@ -116,6 +116,29 @@ class SaltBridgeResult:
         """Fraction of charged residues in at least one bridge."""
         return self.n_engaged_residues / self.n_charged_residues if self.n_charged_residues else 0.0
 
+    def per_1000_a2(self, buried_surface_area_a2: float) -> float:
+        """Bridges per 1000 square angstroms of buried interface.
+
+        A third normalisation, and the one least like the other two. Both
+        ``per_charged_residue`` and ``per_opportunity`` divide by something that
+        grows with the charge being added, and ``per_opportunity`` divides by a
+        Cartesian product that grows quadratically, so a flat ratio there is
+        weaker evidence than it looks: the denominator can outrun a real gain.
+
+        Buried area is fixed by the native backbone and does not move with the
+        charge dial at all, so this asks a different question. How many bridges
+        does this interface carry, for its size? If the raw count rises while
+        this rises too, the interface really is carrying more bridges per unit of
+        contact, whatever the opportunity ratio says.
+        """
+        if buried_surface_area_a2 <= 0:
+            raise ValueError(
+                f"buried surface area must be positive, got {buried_surface_area_a2}. "
+                "A zero or negative area means the interface was not computed, and "
+                "dividing by it would produce a density from nothing."
+            )
+        return 1000.0 * self.n_bridges / buried_surface_area_a2
+
     def to_row(self) -> dict[str, Any]:
         """Flat mapping for a results table, with the definition in the names."""
         tag = self.definition

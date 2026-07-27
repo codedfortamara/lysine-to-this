@@ -4,6 +4,7 @@
 data/raw/*
 data/native/*
 data/interim/*
+data/ablation/*
 !data/**/.gitkeep
 
 # Results and figures are build products of a specific run. They are

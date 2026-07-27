@@ -87,6 +87,33 @@ def main(argv: list[str] | None = None) -> int:
     rows: list[dict] = []
     skipped: list[tuple[str, str]] = []
 
+    # Buried interface area, for the one normalisation whose denominator does
+    # not move with the charge being added. Optional: without it the run still
+    # reports the other three, it just cannot report density.
+    interfaces_path = results_dir / "interfaces.csv"
+    buried_area: dict[tuple[str, str], float] = {}
+    if interfaces_path.is_file():
+        interfaces = pd.read_csv(interfaces_path)
+        needed = {"pdb_id", "chain", "buried_surface_area_a2"}
+        if needed.issubset(interfaces.columns):
+            buried_area = {
+                (str(r.pdb_id), str(r.chain)): float(r.buried_surface_area_a2)
+                for r in interfaces.itertuples()
+                if float(r.buried_surface_area_a2) > 0
+            }
+        else:
+            print(
+                f"note: {interfaces_path} lacks {sorted(needed - set(interfaces.columns))}, "
+                "so area-normalised density is not reported",
+                file=sys.stderr,
+            )
+    else:
+        print(
+            f"note: {interfaces_path} not found, so area-normalised density is not "
+            "reported. Run scripts/01_define_interfaces.py to enable it.",
+            file=sys.stderr,
+        )
+
     with run_manifest(
         script=Path(__file__),
         parameters={
@@ -134,6 +161,9 @@ def main(argv: list[str] | None = None) -> int:
                     record[f"{label}_{scope}_fraction_engaged"] = (
                         result.fraction_charged_residues_engaged
                     )
+                    area = buried_area.get((row.pdb_id, designed))
+                    if area is not None:
+                        record[f"{label}_{scope}_per_1000_a2"] = result.per_1000_a2(area)
                 composition = charged_composition(extract, config.salt_bridge.include_histidine)
                 record[f"{label}_n_charged"] = composition["n_charged"]
                 record[f"{label}_n_opportunities"] = composition["n_opportunities"]
@@ -166,6 +196,23 @@ def main(argv: list[str] | None = None) -> int:
                 "normalised_ci": [normalised.low, normalised.high],
                 "normalised_excludes_zero": normalised.excludes_zero,
             }
+
+            density_column = f"design_{scope}_per_1000_a2"
+            if density_column in table.columns:
+                # Buried area is set by the native backbone and does not move
+                # with the dial, unlike the opportunity denominator, which grows
+                # quadratically with added charge. If the raw count rises and
+                # density rises with it while per-opportunity stays flat, the
+                # flat ratio is the denominator outrunning a real gain rather
+                # than evidence of no gain.
+                density = paired_bootstrap_ci(
+                    table[density_column].tolist(),
+                    table[f"native_{scope}_per_1000_a2"].tolist(),
+                    seed=args.seed,
+                )
+                summary[scope]["density_difference_per_1000_a2"] = density.estimate
+                summary[scope]["density_ci"] = [density.low, density.high]
+                summary[scope]["density_excludes_zero"] = density.excludes_zero
 
         composition = paired_bootstrap_ci(
             table["design_n_charged"].tolist(), table["native_n_charged"].tolist(), seed=args.seed
@@ -215,6 +262,13 @@ def main(argv: list[str] | None = None) -> int:
             f"  {'RESOLVED' if block['normalised_excludes_zero'] else 'includes zero'}",
             file=sys.stderr,
         )
+        if "density_difference_per_1000_a2" in block:
+            print(
+                f"  per 1000 A2      difference {block['density_difference_per_1000_a2']:+.4f} "
+                f"[{block['density_ci'][0]:+.4f}, {block['density_ci'][1]:+.4f}]"
+                f"  {'RESOLVED' if block['density_excludes_zero'] else 'includes zero'}",
+                file=sys.stderr,
+            )
     print(f"\nmanifest hash: {manifest.manifest_hash}", file=sys.stderr)
     return 0
 
