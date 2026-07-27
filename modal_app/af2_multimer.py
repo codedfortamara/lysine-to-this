@@ -29,9 +29,17 @@ A ProteinMPNN design has no evolutionary history, so an MSA for it is
 meaningless and actively misleading: the search would return homologues of the
 native sequence the design was derived from, and the prediction would be
 propped up by information the design does not carry. A chain held at its native
-sequence keeps its MSA, because there the evolutionary signal is real. Mixing
-the two within one complex is the correct treatment and it is what the
-``msa_mode`` field of each job encodes.
+sequence keeps its MSA, because there the evolutionary signal is real, and
+dropping it would degrade every prediction at every beta for reasons unrelated
+to charge, which is the kind of uniform degradation that hides a real effect.
+
+ColabFold's ``msa_mode`` switch is all-or-nothing across a complex, so this is
+done by building the alignment directly and passing it in: MMseqs2 is queried
+for the native chain only, the designed chain contributes a depth-one block of
+its own sequence, and ColabFold's own ``msa_to_str`` assembles the complex a3m
+so that the format is never reimplemented here. There is no paired block, since
+pairing matches homologues by organism and a design has no organism. That
+limitation is recorded per job as ``msa_paired`` rather than left implicit.
 
 **One obvious timeout constant.** ``AF2Params.timeout_s``, two hours, sized for
 the largest complex rather than the median. A job killed at hour two has cost
@@ -226,7 +234,8 @@ def estimate_cost(
         )
 
     containers = min(params.max_containers, n_jobs)
-    compute_hours = n_jobs * params.estimated_minutes_per_job / 60.0
+    minutes_per_job = params.estimated_minutes_per_job + params.msa_overhead_minutes
+    compute_hours = n_jobs * minutes_per_job / 60.0
     cold_start_hours = containers * params.cold_start_minutes / 60.0
     gpu_hours = (compute_hours + cold_start_hours) * (1.0 + params.failure_overhead)
 
@@ -234,7 +243,9 @@ def estimate_cost(
         "n_jobs": n_jobs,
         "gpu_type": gpu_type,
         "usd_per_gpu_hour": rate,
-        "estimated_minutes_per_job": params.estimated_minutes_per_job,
+        "estimated_minutes_per_job": minutes_per_job,
+        "estimated_minutes_per_job_compute": params.estimated_minutes_per_job,
+        "estimated_minutes_per_job_msa_overhead": params.msa_overhead_minutes,
         # Deliberately unrounded. Rounding here would destroy the arithmetic
         # properties a caller may rely on (a grid of twice the size costing
         # exactly twice the compute) and would compound across the comparison
@@ -448,6 +459,62 @@ def chunked(items: list, size: int) -> list[list]:
 
 
 # ---------------------------------------------------------------------------
+# Mixed-mode MSAs
+# ---------------------------------------------------------------------------
+
+
+def msa_plan(job: Job) -> dict[str, str]:
+    """Decide, per chain, whether to search for homologues.
+
+    Returns the chain-to-mode mapping actually used, after checking it against
+    the one invariant that matters: a redesigned chain must never be given an
+    MSA. Searching with a design's sequence returns homologues of the *native*
+    it was derived from, because the design retains enough of the native's
+    profile to be found by them. AlphaFold would then be predicting the fold of
+    a family the design does not belong to, and a high-charge design that ought
+    to fail could be propped up into looking fine.
+
+    The partner chain is different. It is held at its native sequence, its
+    evolutionary signal is real, and dropping it would degrade the prediction
+    for reasons that have nothing to do with the charge dial. Discarding it
+    would make every complex look worse at every beta, which is exactly the kind
+    of uniform degradation that hides a real effect.
+    """
+    modes = dict(job.msa_mode)
+    missing = set(job.chains) - set(modes)
+    if missing:
+        raise ValueError(f"{job.key}: no MSA mode recorded for chain(s) {sorted(missing)}")
+    unknown = {mode for mode in modes.values()} - {"msa", "single_sequence"}
+    if unknown:
+        raise ValueError(f"{job.key}: unrecognised MSA mode(s) {sorted(unknown)}")
+    if modes.get(job.designed_chain) != "single_sequence":
+        raise ValueError(
+            f"{job.key}: designed chain {job.designed_chain} is set to "
+            f"{modes.get(job.designed_chain)!r}. A design has no evolutionary "
+            "history, so an MSA for it would return homologues of the native it "
+            "was derived from and prop the prediction up with information the "
+            "design does not carry."
+        )
+    return modes
+
+
+def pairing_is_meaningful(modes: dict[str, str]) -> bool:
+    """Can the chains' alignments be paired by organism?
+
+    Only when every chain has a real MSA. Pairing matches homologues that
+    co-occur in the same species, which is where AlphaFold-Multimer gets much of
+    its interface signal. A designed chain has no species, so nothing can be
+    paired to it and the unpaired blocks are all there is.
+
+    This is a real cost of the mixed-mode treatment and it should be stated in
+    the paper rather than buried: interface confidence for a design is derived
+    from the partner's evolutionary signal plus the design's own sequence, with
+    no co-evolutionary pairing across the interface.
+    """
+    return all(mode == "msa" for mode in modes.values())
+
+
+# ---------------------------------------------------------------------------
 # Modal application
 # ---------------------------------------------------------------------------
 
@@ -508,20 +575,20 @@ if MODAL_AVAILABLE:  # pragma: no cover - requires Modal
         ordered = sorted(job.chains)
         query_sequence = ":".join(job.chains[c] for c in ordered)
 
-        # Any chain in single-sequence mode forces single-sequence mode for the
-        # complex under ColabFold's batch interface. That is the conservative
-        # choice: it never props a design up with homologues it does not have.
-        # Retaining a real MSA for the native chain alone needs a precomputed
-        # per-chain a3m, which is the documented follow-up below.
-        use_msa = all(mode == "msa" for mode in job.msa_mode.values())
+        modes = msa_plan(job)
+        a3m_lines = build_mixed_a3m(job, ordered, modes, cache_dir=Path(RESULTS_PATH) / "msa_cache")
 
         colabfold_run(
-            queries=[(job.key, query_sequence, None)],
+            # Passing the alignment directly is what makes the mixed treatment
+            # possible. ColabFold's own ``msa_mode`` switch is all-or-nothing
+            # across the complex, so going through it would force either an MSA
+            # for the design or no MSA for the partner, and both are wrong.
+            queries=[(job.key, query_sequence, a3m_lines)],
             result_dir=str(out_dir),
             num_models=PARAMS.num_models,
             num_recycles=PARAMS.num_recycles,
             model_type="alphafold2_multimer_v3",
-            msa_mode="mmseqs2_uniref_env" if use_msa else "single_sequence",
+            msa_mode="single_sequence",
             use_templates=False,
             random_seed=PARAMS.random_seed,
             is_complex=True,
@@ -544,6 +611,7 @@ if MODAL_AVAILABLE:  # pragma: no cover - requires Modal
                 "key": job.key,
                 "wall_clock_s": time.time() - started,
                 "msa_mode": job.msa_mode,
+                "msa_paired": pairing_is_meaningful(modes),
                 "num_recycles": PARAMS.num_recycles,
                 "num_models": PARAMS.num_models,
                 "random_seed": PARAMS.random_seed,
@@ -554,6 +622,81 @@ if MODAL_AVAILABLE:  # pragma: no cover - requires Modal
         metrics_path.write_text(json.dumps(metrics, indent=2, sort_keys=True, default=str) + "\n")
         results_volume.commit()
         return metrics
+
+    def build_mixed_a3m(
+        job: Job, chain_order: list[str], modes: dict[str, str], cache_dir: Path
+    ) -> str:
+        """Assemble one alignment where some chains have homologues and some do not.
+
+        The format is generated by ColabFold's own ``msa_to_str`` rather than
+        written out here. The complex a3m has a header encoding per-chain
+        lengths and cardinalities and pads every hit with gaps across the other
+        chains' columns, and a version skew in any of that would not raise, it
+        would silently misalign the MSA against the sequence and produce
+        confident nonsense. Letting the consumer build its own input removes
+        that whole class of failure.
+
+        The search result is cached on the results volume under the complex and
+        chain, **not** under the job. The partner chain is held at its native
+        sequence at every beta, so all five charge settings of a complex want
+        the identical alignment. Caching per job would issue one query per job
+        rather than one per complex, which on this grid is 275 queries instead
+        of 55. That matters twice over: the MMseqs2 server is a free shared
+        resource, and the wait happens inside the GPU container, so a repeated
+        search is billed at the A100 rate for doing nothing.
+        """
+        from colabfold.batch import msa_to_str
+        from colabfold.colabfold import run_mmseqs2
+
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        unpaired: list[str] = []
+
+        for chain_id in chain_order:
+            sequence = job.chains[chain_id]
+            if modes[chain_id] == "single_sequence":
+                # The design is its own alignment, depth one.
+                unpaired.append(f">{job.key}_{chain_id}\n{sequence}\n")
+                continue
+
+            cached = cache_dir / f"{job.pdb_id}_{chain_id}.a3m"
+            # Another container may have written this since this one started.
+            results_volume.reload()
+            if cached.is_file():
+                unpaired.append(cached.read_text())
+                continue
+
+            result = run_mmseqs2(
+                [sequence],
+                str(cache_dir / f"mmseqs_{job.pdb_id}_{chain_id}"),
+                use_env=True,
+                use_filter=True,
+                use_templates=False,
+                use_pairing=False,
+            )
+            lines = result[0] if isinstance(result, list | tuple) else result
+            if not lines or ">" not in lines:
+                raise RuntimeError(
+                    f"{job.key}: MMseqs2 returned no alignment for native chain "
+                    f"{chain_id}. Refusing to fall back to single-sequence "
+                    "silently, because that would change what this job measures "
+                    "without changing what it is labelled."
+                )
+            cached.write_text(lines)
+            results_volume.commit()
+            unpaired.append(lines)
+
+        # No paired block, ever, on this job set. Pairing matches homologues by
+        # organism across chains, and a design belongs to no organism, so there
+        # is nothing to pair it to. Every job here has exactly one designed
+        # chain, so pairing_is_meaningful is uniformly false; it is recorded in
+        # the metrics rather than branched on, because the limitation belongs in
+        # the results table where it can be reported.
+        return msa_to_str(
+            unpaired_msa=unpaired,
+            paired_msa=None,
+            query_seqs_unique=[job.chains[c] for c in chain_order],
+            query_seqs_cardinality=[1] * len(chain_order),
+        )
 
     @app.local_entrypoint()
     def run(
@@ -606,7 +749,9 @@ if MODAL_AVAILABLE:  # pragma: no cover - requires Modal
 
             results: list = []
             for batch_number, batch in enumerate(chunked(ordered, chunk_size), start=1):
-                if not guard.may_start(len(batch), PARAMS.estimated_minutes_per_job):
+                if not guard.may_start(
+                    len(batch), PARAMS.estimated_minutes_per_job + PARAMS.msa_overhead_minutes
+                ):
                     print(
                         f"\nBUDGET STOP before batch {batch_number}: {guard.status()}.\n"
                         f"Starting {len(batch)} more job(s) would exceed the ceiling. "
@@ -712,11 +857,13 @@ def collect_metrics(
     lengths = [len(job.chains[c]) for c in chain_order]
 
     interface_pae: float | None = None
+    ipsae_scores: dict = {"ipsae_note": "PAE matrix absent or not shaped like the complex"}
     if pae.size and len(lengths) == 2 and pae.shape[0] == sum(lengths):
         first = lengths[0]
         cross_upper = pae[:first, first:]
         cross_lower = pae[first:, :first]
         interface_pae = float((cross_upper.mean() + cross_lower.mean()) / 2.0)
+        ipsae_scores = ipsae(pae, lengths, PARAMS.ipsae_pae_cutoff_a)
 
     predicted_pdbs = sorted(out_dir.glob("*relaxed*.pdb")) or sorted(out_dir.glob("*.pdb"))
 
@@ -728,6 +875,7 @@ def collect_metrics(
         "predicted_pdb": str(predicted_pdbs[0].name) if predicted_pdbs else None,
         "interface_rmsd_a": None,
         "interface_rmsd_note": "native structure not available in the container",
+        **ipsae_scores,
     }
 
     if native_path is not None and predicted_pdbs:
@@ -741,6 +889,126 @@ def collect_metrics(
         )
 
     return metrics
+
+
+def _d0_scalar(length: float) -> float:
+    """Yang and Skolnick (2004) length normalisation, reference scalar form.
+
+    Reproduces ``calc_d0`` in the ipSAE reference, which returns exactly 1.0 at
+    or below 27 residues rather than evaluating the cube root there. This
+    differs from the array form below 28 residues, and the two are kept separate
+    rather than unified because the reference applies each in a specific place
+    and matching it is the point.
+    """
+    if length > 27.0:
+        return max(1.0, 1.24 * (float(length) - 15.0) ** (1.0 / 3.0) - 1.8)
+    return 1.0
+
+
+def _d0_array(lengths: Any) -> Any:
+    """Reference ``calc_d0_array``: floors the length at 26, then the result at 1.0."""
+    import numpy as np
+
+    clamped = np.maximum(26.0, np.asarray(lengths, dtype=float))
+    return np.maximum(1.0, 1.24 * (clamped - 15.0) ** (1.0 / 3.0) - 1.8)
+
+
+def ipsae(
+    pae: Any,
+    lengths: list[int],
+    pae_cutoff_a: float,
+) -> dict:
+    """Interface pTM with the length normalisation taken from the interface.
+
+    Why this is here at all: ipTM applies a d0 derived from the *total* number
+    of residues in the complex. d0 grows with the cube root of that total, so
+    the same physical interface scores differently depending on how large the
+    chains around it happen to be. Across a set of complexes spanning a wide
+    range of chain lengths, ipTM is therefore not comparable between complexes,
+    and a charge effect estimated across them is confounded by size.
+
+    ipSAE (Dunbrack, 2025) computes d0 from the number of residues actually
+    involved in the interface instead, which removes the dependence on the parts
+    of the chains that have nothing to do with binding.
+
+    Implemented from the reference at github.com/DunbrackLab/IPSAE. Three
+    normalisations are returned, all of them restricted to cross-chain pairs
+    scoring below ``pae_cutoff_a``:
+
+    ``ipsae_d0res``
+        The headline score. d0 is recomputed for every aligned residue from the
+        number of partner residues it confidently places.
+    ``ipsae_d0dom``
+        d0 from the count of distinct residues on both sides that participate in
+        any confident pair, that is, from the size of the interface as a whole.
+    ``ipsae_d0chn``
+        d0 from the two chain lengths, so it differs from ipTM only by the
+        cutoff. Reported as the control: if a charge trend appears in this one
+        as strongly as in the others, the length normalisation was not what
+        mattered.
+
+    Each is asymmetric, so both directions are returned along with the maximum,
+    which is the value the reference reports.
+    """
+    import numpy as np
+
+    pae = np.asarray(pae, dtype=float)
+    if len(lengths) != 2:
+        raise ValueError(f"ipSAE is defined for a two-chain interface, got {len(lengths)} chains")
+    total = int(sum(lengths))
+    if pae.ndim != 2 or pae.shape != (total, total):
+        raise ValueError(
+            f"PAE matrix is {pae.shape}, expected ({total}, {total}) for chains of "
+            f"lengths {lengths}. Refusing to score a matrix that does not match "
+            "the sequences, because slicing it wrongly would silently score the "
+            "wrong residue pairs."
+        )
+
+    first = int(lengths[0])
+    chain_of = np.concatenate([np.zeros(first, dtype=int), np.ones(total - first, dtype=int)])
+
+    result: dict = {"ipsae_pae_cutoff_a": float(pae_cutoff_a)}
+
+    for direction, (aligned, scored) in enumerate([(0, 1), (1, 0)]):
+        rows = chain_of == aligned
+        # valid[i, j]: pair is cross-chain in this direction and confident.
+        valid = np.outer(rows, chain_of == scored) & (pae < pae_cutoff_a)
+        n_per_residue = valid.sum(axis=1)
+
+        # d0res: one d0 per aligned residue, from its own partner count.
+        d0_res = _d0_array(n_per_residue)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            ptm_res = 1.0 / (1.0 + (pae / d0_res[:, None]) ** 2)
+
+        # d0dom: one d0 for the pair, from the number of distinct residues on
+        # either side that take part in any confident pair.
+        n_interface = int((valid.any(axis=1) & rows).sum() + valid.any(axis=0).sum())
+        d0_dom = _d0_scalar(n_interface)
+        ptm_dom = 1.0 / (1.0 + (pae / d0_dom) ** 2)
+
+        d0_chn = _d0_scalar(total)
+        ptm_chn = 1.0 / (1.0 + (pae / d0_chn) ** 2)
+
+        counts = np.where(n_per_residue > 0, n_per_residue, 1)
+        by_residue = {
+            "d0res": (ptm_res * valid).sum(axis=1) / counts,
+            "d0dom": (ptm_dom * valid).sum(axis=1) / counts,
+            "d0chn": (ptm_chn * valid).sum(axis=1) / counts,
+        }
+        label = f"{aligned}to{scored}"
+        for name, values in by_residue.items():
+            # Residues with no confident partner score zero, matching the
+            # reference, rather than being dropped.
+            scores = np.where(n_per_residue > 0, values, 0.0)[rows]
+            result[f"ipsae_{name}_{label}"] = float(scores.max()) if scores.size else 0.0
+        result[f"ipsae_n_interface_residues_{label}"] = n_interface
+        result[f"ipsae_d0dom_value_{label}"] = d0_dom
+        if direction == 0:
+            result["ipsae_d0chn_value"] = d0_chn
+
+    for name in ("d0res", "d0dom", "d0chn"):
+        result[f"ipsae_{name}"] = max(result[f"ipsae_{name}_0to1"], result[f"ipsae_{name}_1to0"])
+    return result
 
 
 def interface_rmsd(
@@ -893,6 +1161,15 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Cost the same grid across every GPU type with a recorded rate.",
     )
+    parser.add_argument(
+        "--budget-usd",
+        type=float,
+        default=122.0,
+        help=(
+            "Ceiling to check the estimate against. Only reports how much "
+            "headroom is left; the dry run never launches anything."
+        ),
+    )
     grid = parser.add_argument_group(
         "hypothetical grid",
         "Cost a grid before designs.csv exists. Give all three to skip reading "
@@ -982,11 +1259,33 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(rounded, indent=2))
 
     print(
-        f"\nNOTE: {params.estimated_minutes_per_job} minutes per job is a planning "
-        "assumption from\nconfig.AF2Params, not a measurement, and the GPU rates are "
-        "UNVERIFIED. Run a pilot\nof about ten jobs, take the observed median, and "
-        "re-run with --minutes-per-job\nbefore committing to a budget."
+        f"\nNOTE: {params.estimated_minutes_per_job} minutes of compute plus "
+        f"{params.msa_overhead_minutes} for the MSA is a\nplanning assumption from "
+        "config.AF2Params, not a measurement, and the GPU rates\nare UNVERIFIED. Run a "
+        "pilot of about ten jobs, take the observed median, and\nre-run with "
+        "--minutes-per-job before committing to a budget."
     )
+
+    if not args.compare_gpus:
+        estimate = estimate_cost(target, params, gpu_type=args.gpu)
+        headroom = args.budget_usd - estimate["estimated_usd"]
+        if headroom < 0:
+            print(
+                f"\nOVER BUDGET: estimated ${estimate['estimated_usd']:.2f} against a "
+                f"${args.budget_usd:.2f} ceiling.\nRun wave 1 only (beta 0 and +/-1.5), "
+                "or lower the MSA overhead with a pilot\nmeasurement before launching."
+            )
+        elif headroom < 0.15 * args.budget_usd:
+            print(
+                f"\nTIGHT: estimated ${estimate['estimated_usd']:.2f} against a "
+                f"${args.budget_usd:.2f} ceiling leaves only\n${headroom:.2f} of "
+                "headroom. Running with MSAs costs roughly "
+                f"{params.msa_overhead_minutes / params.estimated_minutes_per_job:.0%} "
+                "more than\nsingle-sequence would. If the pilot comes in above "
+                f"{params.estimated_minutes_per_job + params.msa_overhead_minutes:.0f} "
+                "minutes per job, wave 2\n(beta +/-3) is the part to drop: the upstream "
+                "data shows only 10 to 18 percent\nof those designs fold at all."
+            )
     return 0
 
 

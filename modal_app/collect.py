@@ -35,7 +35,22 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 import pandas as pd
 
 from interface_charge.config import RESULTS_DIR
+from interface_charge.paired import paired_deltas, pairing_report
 from interface_charge.provenance import manifest_path_for, run_manifest
+
+#: Metrics reported as a within-complex difference against beta = 0. Absolute
+#: values of these vary far more between complexes than across the charge grid
+#: within one, so the paired form is the one that answers the question.
+PAIRED_METRICS = [
+    "interface_ptm",
+    "ipsae_d0res",
+    "ipsae_d0dom",
+    "ipsae_d0chn",
+    "interface_pae",
+    "interface_rmsd_a",
+    "complex_ptm",
+    "mean_plddt",
+]
 
 #: Columns emitted in a fixed order, so the CSV is diffable across runs.
 COLUMN_ORDER = [
@@ -46,9 +61,16 @@ COLUMN_ORDER = [
     "key",
     "complex_ptm",
     "interface_ptm",
+    "ipsae_d0res",
+    "ipsae_d0dom",
+    "ipsae_d0chn",
+    "ipsae_n_interface_residues_0to1",
+    "ipsae_n_interface_residues_1to0",
+    "ipsae_pae_cutoff_a",
     "interface_pae",
     "interface_rmsd_a",
     "mean_plddt",
+    "msa_paired",
     "n_interface_residues_compared",
     "receptor_superposition_rmsd_a",
     "wall_clock_s",
@@ -153,6 +175,25 @@ def main(argv: list[str] | None = None) -> int:
         out_path = results_dir / "af2_metrics.csv"
         table.to_csv(out_path, index=False)
         manifest.add_output(out_path)
+
+        pairing: dict | None = None
+        available = [m for m in PAIRED_METRICS if m in table.columns]
+        if available and {"pdb_id", "designed_chain", "replicate", "beta"}.issubset(table.columns):
+            paired = paired_deltas(table, available)
+            paired_path = results_dir / "af2_paired_deltas.csv"
+            paired.to_csv(paired_path, index=False)
+            manifest.add_output(paired_path)
+            pairing = pairing_report(table)
+            pairing["metrics_paired"] = available
+            pairing["n_rows_without_a_beta_zero_reference"] = int((~paired["has_reference"]).sum())
+        else:
+            print(
+                "note: paired deltas skipped, the collected table lacks the "
+                "pairing keys or every paired metric",
+                file=sys.stderr,
+            )
+
+        manifest.note("pairing", pairing)
         manifest.note("n_collected", len(table))
         manifest.note("n_expected", n_expected)
         manifest.note("n_missing", len(missing_keys))
@@ -163,6 +204,19 @@ def main(argv: list[str] | None = None) -> int:
     manifest.write(manifest_target)
 
     print(f"collected {len(table)} result(s) into {out_path}", file=sys.stderr)
+    if pairing is not None:
+        print(
+            f"paired against beta = 0: {pairing['n_lineages_complete_across_beta']} "
+            f"of {pairing['n_lineages']} design lineage(s) came back at every beta",
+            file=sys.stderr,
+        )
+        if pairing["n_rows_without_a_beta_zero_reference"]:
+            print(
+                f"  {pairing['n_rows_without_a_beta_zero_reference']} row(s) have no "
+                "beta = 0 reference, so their deltas are empty rather than computed "
+                "against another complex",
+                file=sys.stderr,
+            )
     if unreadable:
         print(f"{len(unreadable)} file(s) could not be read:", file=sys.stderr)
         for line in unreadable[:10]:

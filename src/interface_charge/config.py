@@ -325,6 +325,24 @@ class AF2Params:
     #: Maximum number of containers Modal may run at once.
     max_containers: int = 20
 
+    #: Extra GPU minutes per job attributable to running with an MSA rather than
+    #: single-sequence. Two effects, both billed at the GPU rate because both
+    #: happen inside the GPU container: the one-off MMseqs2 search for each
+    #: complex's native partner chain, amortised over the five beta settings that
+    #: share it, and the larger MSA representation AlphaFold then has to embed
+    #: and recycle on every job.
+    #:
+    #: A planning assumption, like estimated_minutes_per_job, and the single
+    #: number most worth replacing with a pilot measurement: it applies to every
+    #: job in the grid, so an error here scales straight into the bill.
+    msa_overhead_minutes: float = 3.0
+
+    #: PAE below which a cross-chain residue pair counts towards ipSAE, in
+    #: angstroms. Ten is the value used throughout Dunbrack (2025). The score is
+    #: not scale-free in this parameter, so it is pinned here rather than passed
+    #: at the call site, and it is recorded in every manifest.
+    ipsae_pae_cutoff_a: float = 10.0
+
     #: Published on-demand price per GPU-hour in US dollars, used only for the
     #: dry-run estimate. CHECK AGAINST CURRENT MODAL PRICING before quoting a
     #: number to anyone: these were recorded from memory and modal.com was not
