@@ -26,6 +26,7 @@ from af2_multimer import (
     IMAGE_PACKAGES,
     IMAGE_PYTHON_VERSION,
     JAX_PACKAGE,
+    LOCAL_PYTHON_SOURCES,
 )
 
 #: From ``pypi.org/pypi/colabfold/1.5.5/json``, ``info.requires_dist``.
@@ -116,3 +117,62 @@ def test_the_alphafold_extra_is_requested() -> None:
     """Without it colabfold installs with no model to run."""
     matching = [s for s in IMAGE_PACKAGES if parse_pin(s)[0] == "colabfold"]
     assert "[alphafold]" in matching[0]
+
+
+# ---------------------------------------------------------------------------
+# Local source
+# ---------------------------------------------------------------------------
+
+
+def repository_packages() -> set[str]:
+    """Top-level packages under ``src/``, which is what the container can miss."""
+    src = Path(__file__).resolve().parents[1] / "src"
+    return {p.name for p in src.iterdir() if p.is_dir() and (p / "__init__.py").is_file()}
+
+
+def top_level_imports() -> set[str]:
+    """Packages ``af2_multimer`` imports at module scope, by reading its source.
+
+    Parsed rather than introspected because the question is what the *container*
+    will need at import time, and the container imports the module fresh.
+    """
+    import ast
+
+    source = (Path(__file__).resolve().parents[1] / "modal_app" / "af2_multimer.py").read_text()
+    tree = ast.parse(source)
+    names: set[str] = set()
+    for node in tree.body:  # module scope only, not function-local imports
+        if isinstance(node, ast.Import):
+            names.update(alias.name.split(".")[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
+            names.add(node.module.split(".")[0])
+    return names
+
+
+def test_every_repository_package_imported_at_module_scope_is_shipped() -> None:
+    """The failure this exists for: containers crash-looping on ModuleNotFoundError.
+
+    Modal mounts the entrypoint module and nothing else. A package imported from
+    ``src/`` resolves locally through the ``sys.path`` insert at the top of the
+    file, so a dry run and the whole test suite pass, and the first sign of
+    trouble is every container dying on import after the GPUs are allocated.
+    """
+    needed = top_level_imports() & repository_packages()
+    missing = needed - set(LOCAL_PYTHON_SOURCES)
+    assert not missing, (
+        f"af2_multimer imports {sorted(missing)} at module scope, but "
+        f"LOCAL_PYTHON_SOURCES ships {LOCAL_PYTHON_SOURCES}. Every container will "
+        "fail to start."
+    )
+
+
+def test_nothing_is_shipped_that_does_not_exist() -> None:
+    """A stale entry would be a silent no-op rather than an error."""
+    unknown = set(LOCAL_PYTHON_SOURCES) - repository_packages()
+    assert not unknown, f"LOCAL_PYTHON_SOURCES names {sorted(unknown)}, absent from src/"
+
+
+def test_interface_charge_is_the_package_actually_required() -> None:
+    """Guards the test above against passing because both sides are empty."""
+    assert "interface_charge" in repository_packages()
+    assert "interface_charge" in top_level_imports()

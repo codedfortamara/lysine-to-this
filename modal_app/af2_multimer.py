@@ -117,6 +117,18 @@ JAX_PACKAGE: str = "jax[cuda12]==0.4.28"
 #: colabfold 1.5.5 declares ``requires_python >=3.9,<3.12``.
 IMAGE_PYTHON_VERSION: str = "3.11"
 
+#: Repository packages the container needs, over and above this file.
+#:
+#: Modal mounts the entrypoint module automatically and nothing else, so a
+#: package imported from ``src/`` is present locally and absent remotely. The
+#: ``sys.path`` insert at the top of this file hides that completely during a
+#: dry run and every local test, and the failure only appears once containers
+#: start: each one crash-loops on ``ModuleNotFoundError`` after the image has
+#: already built and the GPUs have already been allocated.
+#:
+#: Declared here so a test can check it against this module's own imports.
+LOCAL_PYTHON_SOURCES: list[str] = ["interface_charge"]
+
 
 # ---------------------------------------------------------------------------
 # Job enumeration. Pure Python, no Modal, so --dry-run always works.
@@ -684,6 +696,11 @@ if MODAL_AVAILABLE:  # pragma: no cover - requires Modal
         )
         .pip_install(JAX_PACKAGE)
         .env({"XLA_PYTHON_CLIENT_PREALLOCATE": "false", "TF_FORCE_UNIFIED_MEMORY": "1"})
+        # Ship the project's own package. Modal mounts the entrypoint module and
+        # nothing else, so without this the container has af2_multimer.py and no
+        # interface_charge to import from it. Local source is attached after the
+        # build layers, so editing it does not rebuild the colabfold image.
+        .add_local_python_source(*LOCAL_PYTHON_SOURCES)
     )
 
     app = modal.App("interface-charge-af2-multimer")
