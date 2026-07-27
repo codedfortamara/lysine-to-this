@@ -1,0 +1,201 @@
+{
+  "created_utc": "2026-07-27T01:28:28+00:00",
+  "environment": {
+    "machine": "ARM64",
+    "packages": {
+      "biopython": "1.87",
+      "freesasa": null,
+      "matplotlib": "3.11.1",
+      "modal": null,
+      "numpy": "2.5.1",
+      "pandas": "3.0.5",
+      "scipy": null
+    },
+    "platform": "Windows-11-10.0.26200-SP0",
+    "python": "3.12.10",
+    "python_implementation": "CPython"
+  },
+  "git": {
+    "branch": "claude/lysine-to-this-plan-kfmjfn",
+    "commit": "e23e838c8eef253f71c816ffdec3fb52a2e25fe8",
+    "dirty": true,
+    "dirty_paths": [
+      "chain",
+      "config.toml",
+      "data/pdb/"
+    ]
+  },
+  "inputs": [
+    {
+      "path": "C:\\Users\\tamar\\OneDrive\\Documents\\Mohammed\\zetadial\\designs_for_folding.json",
+      "sha256": "0a2682bb22a015c99e9c4a825803043378b4616ee04449b4c24995c5f819e2a6",
+      "size_bytes": 896452
+    }
+  ],
+  "manifest_hash": "38a17cfb2121ca6e59f7663ef3cdf756f8f7f485466db35fd0b6520bd2d8910d",
+  "notes": {
+    "n_complexes": 55,
+    "n_designs": 275,
+    "n_skipped": 5,
+    "n_ties_resolved": 24,
+    "skip_reasons": {
+      "no chain of length 210 found": 1,
+      "no chain of length 286 found": 1,
+      "no chain of length 288 found": 1,
+      "no chain of length 403 found": 1,
+      "no chain of length 442 found": 1
+    },
+    "skipped": [
+      {
+        "pdb_id": "2V3C",
+        "reason": "no chain of length 403 found. Chains present: ['A', 'B', 'C', 'D', 'M', 'N']. The export and the structure disagree."
+      },
+      {
+        "pdb_id": "2V64",
+        "reason": "no chain of length 210 found. Chains present: ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I']. The export and the structure disagree."
+      },
+      {
+        "pdb_id": "2AOU",
+        "reason": "no chain of length 288 found. Chains present: ['A', 'B']. The export and the structure disagree."
+      },
+      {
+        "pdb_id": "2AOT",
+        "reason": "no chain of length 286 found. Chains present: ['A', 'B']. The export and the structure disagree."
+      },
+      {
+        "pdb_id": "2YCL",
+        "reason": "no chain of length 442 found. Chains present: ['A', 'B']. The export and the structure disagree."
+      }
+    ],
+    "ties_resolved": [
+      {
+        "note": "tie between ['A', 'C', 'E'], took the alphabetically first (A); the chains are sequence-identical so the interface is the same either way",
+        "pdb_id": "3G3A"
+      },
+      {
+        "note": "tie between ['A', 'B'], took the alphabetically first (A); the chains are sequence-identical so the interface is the same either way",
+        "pdb_id": "1PXV"
+      },
+      {
+        "note": "tie between ['A', 'B'], took the alphabetically first (A); the chains are sequence-identical so the interface is the same either way",
+        "pdb_id": "1Y4H"
+      },
+      {
+        "note": "tie between ['C', 'G'], took the alphabetically first (C); the chains are sequence-identical so the interface is the same either way",
+        "pdb_id": "2Z5H"
+      },
+      {
+        "note": "tie between ['C', 'G'], took the alphabetically first (C); the chains are sequence-identical so the interface is the same either way",
+        "pdb_id": "2Z5I"
+      },
+      {
+        "note": "tie between ['A', 'C'], took the alphabetically first (A); the chains are sequence-identical so the interface is the same either way",
+        "pdb_id": "1FS2"
+      },
+      {
+        "note": "tie between ['A', 'E'], took the alphabetically first (A); the chains are sequence-identical so the interface is the same either way",
+        "pdb_id": "1XQH"
+      },
+      {
+        "note": "tie between ['A', 'B'], took the alphabetically first (A); the chains are sequence-identical so the interface is the same either way",
+        "pdb_id": "1O9S"
+      },
+      {
+        "note": "tie between ['C', 'D'], took the alphabetically first (C); the chains are sequence-identical so the interface is the same either way",
+        "pdb_id": "3O1J"
+      },
+      {
+        "note": "tie between ['A', 'P'], took the alphabetically first (A); the chains are sequence-identical so the interface is the same either way",
+        "pdb_id": "1KJ1"
+      },
+      {
+        "note": "tie between ['B', 'D'], took the alphabetically first (B); the chains are sequence-identical so the interface is the same either way",
+        "pdb_id": "1I7S"
+      },
+      {
+        "note": "tie between ['B', 'D'], took the alphabetically first (B); the chains are sequence-identical so the interface is the same either way",
+        "pdb_id": "1I7Q"
+      },
+      {
+        "note": "tie between ['B', 'C'], took the alphabetically first (B); the chains are sequence-identical so the interface is the same either way",
+        "pdb_id": "1X27"
+      },
+      {
+        "note": "tie between ['A', 'B'], took the alphabetically first (A); the chains are sequence-identical so the interface is the same either way",
+        "pdb_id": "3UA7"
+      },
+      {
+        "note": "tie between ['C', 'D'], took the alphabetically first (C); the chains are sequence-identical so the interface is the same either way",
+        "pdb_id": "3BUK"
+      },
+      {
+        "note": "tie between ['B', 'D'], took the alphabetically first (B); the chains are sequence-identical so the interface is the same either way",
+        "pdb_id": "1BOU"
+      },
+      {
+        "note": "tie between ['B', 'D'], took the alphabetically first (B); the chains are sequence-identical so the interface is the same either way",
+        "pdb_id": "1B4U"
+      },
+      {
+        "note": "tie between ['A', 'C'], took the alphabetically first (A); the chains are sequence-identical so the interface is the same either way",
+        "pdb_id": "1P27"
+      },
+      {
+        "note": "tie between ['A', 'C'], took the alphabetically first (A); the chains are sequence-identical so the interface is the same either way",
+        "pdb_id": "2VJF"
+      },
+      {
+        "note": "tie between ['D', 'H'], took the alphabetically first (D); the chains are sequence-identical so the interface is the same either way",
+        "pdb_id": "2OJE"
+      },
+      {
+        "note": "tie between ['D', 'H'], took the alphabetically first (D); the chains are sequence-identical so the interface is the same either way",
+        "pdb_id": "1R5I"
+      },
+      {
+        "note": "tie between ['B', 'D'], took the alphabetically first (B); the chains are sequence-identical so the interface is the same either way",
+        "pdb_id": "1XVP"
+      },
+      {
+        "note": "tie between ['B', 'D'], took the alphabetically first (B); the chains are sequence-identical so the interface is the same either way",
+        "pdb_id": "1XV9"
+      },
+      {
+        "note": "tie between ['A', 'B'], took the alphabetically first (A); the chains are sequence-identical so the interface is the same either way",
+        "pdb_id": "1I8L"
+      }
+    ]
+  },
+  "outputs": [
+    {
+      "path": "C:\\Users\\tamar\\OneDrive\\Documents\\Mohammed\\ic\\data\\raw\\designs.csv",
+      "sha256": "4ec54962fd38da20586ea8e0cfaf3a7cce408f81541566c159e4a4b87f298f1b",
+      "size_bytes": 64390
+    },
+    {
+      "path": "C:\\Users\\tamar\\OneDrive\\Documents\\Mohammed\\ic\\data\\raw\\test_set.csv",
+      "sha256": "c24afbbbe42f9254786928d91f6ffa3b4054edd2f9375c774915a995381bfc44",
+      "size_bytes": 1689
+    }
+  ],
+  "parameters": {
+    "betas": [
+      -3.0,
+      -1.5,
+      0.0,
+      1.5,
+      3.0
+    ],
+    "homodimer_policy": "first",
+    "min_identity": 0.95,
+    "partner_sequence": "native (upstream discarded the designed partner)",
+    "prefer_chain": null
+  },
+  "schema_version": 1,
+  "script": "11_import_upstream_designs.py",
+  "script_sha256": "176f064cd752e377d10897388d76613033d18862bb4a429b7080f5ace9bc3d4e",
+  "seeds": {
+    "upstream_seed": "none recorded; upstream sampling was unseeded"
+  },
+  "status": "completed"
+}
