@@ -54,12 +54,31 @@ def identity(a: str, b: str) -> float:
     return sum(1 for x, y in zip(a, b, strict=True) if x == y) / len(a)
 
 
-def match_chain(native_seq: str, model, structure_params) -> tuple[str, float]:
+def match_chain(
+    native_seq: str,
+    model,
+    structure_params,
+    prefer_chain: str | None = None,
+    homodimer_policy: str = "raise",
+) -> tuple[str, float, str | None]:
     """Find which chain of ``model`` the exported native sequence came from.
 
-    Returns ``(chain_id, identity)``. Raises if no chain matches well enough, or
-    if two chains match equally well, which happens with homodimers and has to
-    be resolved deliberately rather than by picking the first.
+    Returns ``(chain_id, identity, note)`` where ``note`` records any tie that
+    had to be broken, so an arbitrary choice appears in the output rather than
+    only in someone's memory.
+
+    Ties happen with homodimers, where two chains carry the same sequence. The
+    choice is then genuinely arbitrary, but arbitrary is not the same as
+    unimportant: it must be recorded. ``homodimer_policy`` decides what happens.
+
+    ``raise``
+        Stop and make a person choose. Correct when a tie might indicate
+        something unexpected about the structure.
+    ``first``
+        Take the alphabetically first chain and record that it was a tie. Sound
+        for a genuine homodimer, where both chains were redesigned by the
+        upstream sampling anyway and the interface is symmetric, so either
+        choice gives the same interface.
     """
     scores: list[tuple[float, str]] = []
     for chain_id in chains_present(model):
@@ -87,16 +106,33 @@ def match_chain(native_seq: str, model, structure_params) -> tuple[str, float]:
             "invert the result rather than merely degrade it."
         )
 
-    ties = [c for score, c in scores if score == best_score]
-    if len(ties) > 1:
-        raise StructureError(
-            f"chains {ties} all match at {best_score:.1%}, so the designed chain is "
-            "ambiguous. This is expected for a homodimer, where the choice is "
-            "arbitrary but must be recorded rather than defaulted. Re-run with "
-            "--prefer-chain to state which one."
+    ties = sorted(c for score, c in scores if score == best_score)
+    if len(ties) == 1:
+        return best_chain, best_score, None
+
+    if prefer_chain is not None and prefer_chain in ties:
+        return (
+            prefer_chain,
+            best_score,
+            f"tie between {ties}, resolved to {prefer_chain} by --prefer-chain",
         )
 
-    return best_chain, best_score
+    if homodimer_policy == "first":
+        chosen = ties[0]
+        return (
+            chosen,
+            best_score,
+            f"tie between {ties}, took the alphabetically first ({chosen}); the chains "
+            "are sequence-identical so the interface is the same either way",
+        )
+
+    raise StructureError(
+        f"chains {ties} all match at {best_score:.1%}, so the designed chain is "
+        "ambiguous. This is expected for a homodimer, where the choice is arbitrary "
+        "but must be recorded rather than defaulted. Re-run with --homodimer first "
+        "to take the alphabetically first chain and record the tie, or "
+        f"--prefer-chain to name one of {ties}."
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -111,7 +147,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--prefer-chain",
         default=None,
-        help="Break homodimer ties by preferring this author chain identifier.",
+        help="Break ties by preferring this author chain identifier, when it is tied.",
+    )
+    parser.add_argument(
+        "--homodimer",
+        choices=("raise", "first"),
+        default="raise",
+        help=(
+            "What to do when two chains match equally well. 'raise' stops and makes "
+            "you choose. 'first' takes the alphabetically first and records the tie, "
+            "which is sound for a genuine homodimer because the chains are "
+            "sequence-identical and the interface is the same either way."
+        ),
     )
     parser.add_argument("--quiet", action="store_true")
     return parser
@@ -142,6 +189,7 @@ def main(argv: list[str] | None = None) -> int:
     design_rows: list[dict] = []
     test_rows: list[dict] = []
     skipped: list[tuple[str, str]] = []
+    tie_notes: list[dict[str, str]] = []
 
     with run_manifest(
         script=Path(__file__),
@@ -150,6 +198,7 @@ def main(argv: list[str] | None = None) -> int:
             "betas": payload.get("betas"),
             "partner_sequence": "native (upstream discarded the designed partner)",
             "prefer_chain": args.prefer_chain,
+            "homodimer_policy": args.homodimer,
         },
         seeds={"upstream_seed": "none recorded; upstream sampling was unseeded"},
         inputs=[args.designs_json],
@@ -166,7 +215,15 @@ def main(argv: list[str] | None = None) -> int:
 
             try:
                 model = load_model(native_path, config.structure)
-                designed_chain, score = match_chain(native_seq, model, config.structure)
+                designed_chain, score, tie_note = match_chain(
+                    native_seq,
+                    model,
+                    config.structure,
+                    prefer_chain=args.prefer_chain,
+                    homodimer_policy=args.homodimer,
+                )
+                if tie_note:
+                    tie_notes.append({"pdb_id": pdb_id, "note": tie_note})
 
                 partner_sizes = {}
                 for chain_id in chains_present(model):
@@ -241,6 +298,15 @@ def main(argv: list[str] | None = None) -> int:
         manifest.note("n_designs", len(design_rows))
         manifest.note("n_complexes", len(test_rows))
         manifest.note("n_skipped", len(skipped))
+        manifest.note("n_ties_resolved", len(tie_notes))
+        manifest.note("ties_resolved", tie_notes)
+        manifest.note(
+            "skip_reasons",
+            {
+                reason: sum(1 for _, r in skipped if r.startswith(reason))
+                for reason in sorted({r.split(",")[0].split(".")[0] for _, r in skipped})
+            },
+        )
         manifest.note("skipped", [{"pdb_id": p, "reason": r[:300]} for p, r in skipped])
         manifest_target = manifest_path_for(designs_path)
 
