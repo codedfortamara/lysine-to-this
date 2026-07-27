@@ -169,6 +169,16 @@ def build_parser() -> argparse.ArgumentParser:
             "one. This is the fixed-target experiment, not what upstream ran."
         ),
     )
+    parser.add_argument(
+        "--isolated-chain",
+        action="store_true",
+        help=(
+            "Remove the partner chain from the structure entirely before "
+            "ProteinMPNN sees it. This is the causal control for the interface "
+            "buffering result: if buffering survives with no partner present, it "
+            "was never about the interface."
+        ),
+    )
     parser.add_argument("--quiet", action="store_true")
     return parser
 
@@ -214,7 +224,11 @@ def main(argv: list[str] | None = None) -> int:
             "betas": args.betas,
             "replicates": args.replicates,
             "seed": args.seed,
-            "partner": "native" if args.native_partner else "designed",
+            "partner": (
+                "absent from the structure"
+                if args.isolated_chain
+                else ("native" if args.native_partner else "designed")
+            ),
         },
     )
 
@@ -253,6 +267,7 @@ def main(argv: list[str] | None = None) -> int:
             "alphabet": MPNN_ALPHABET,
             "weights": str(weights),
             "native_partner": args.native_partner,
+            "isolated_chain": args.isolated_chain,
             "device": str(device),
         },
         seeds={"global_seed": args.seed, "derivation": "sha256(seed|pdb|beta|replicate)"},
@@ -332,6 +347,51 @@ def main(argv: list[str] | None = None) -> int:
                     c: sequence_from_indices(S[0], positions[c]) for c in (primary, partner)
                 }
 
+                if args.isolated_chain:
+                    # Re-featurise from the primary chain alone. The selection
+                    # above ran on the full complex on purpose, so that this arm
+                    # designs exactly the chain the paired arm designs; choosing
+                    # the primary from an already-stripped structure could pick a
+                    # different chain and the two arms would not be comparable.
+                    #
+                    # The partner is removed from the *structure*, not merely
+                    # unmasked. Leaving its backbone in place would still let the
+                    # model see the interface geometry, which is the thing being
+                    # ablated.
+                    isolated = parse_PDB(str(path), input_chain_list=[chain_of[primary]])
+                    featurised = tied_featurize(
+                        isolated, device, None, None, None, None, None, None
+                    )
+                    X, S, mask, _lengths, chain_M, chain_encoding_all = featurised[:6]
+                    residue_idx, omit_AA_mask = featurised[12], featurised[11]
+                    pssm_coef, pssm_bias, pssm_log_odds_all, bias_by_res_all = featurised[15:19]
+
+                    valid = mask[0] > 0
+                    encoding = chain_encoding_all[0]
+                    solo = [int(c) for c in encoding[valid].unique().tolist()]
+                    if len(solo) != 1:
+                        skipped.append(
+                            (pdb_id, f"isolated parse yielded {len(solo)} chains, expected 1")
+                        )
+                        continue
+                    only = solo[0]
+                    isolated_positions = (
+                        ((encoding == only) & valid).nonzero(as_tuple=True)[0].tolist()
+                    )
+                    isolated_native = sequence_from_indices(S[0], isolated_positions)
+                    if isolated_native != native_seq[primary]:
+                        skipped.append(
+                            (
+                                pdb_id,
+                                "isolated chain sequence differs from the same chain in "
+                                f"the complex ({len(isolated_native)} against "
+                                f"{len(native_seq[primary])} residues). Refusing to "
+                                "compare arms that are not the same chain.",
+                            )
+                        )
+                        continue
+                    positions = {primary: isolated_positions}
+
                 test_rows.append(
                     {
                         "pdb_id": pdb_id.upper(),
@@ -377,14 +437,19 @@ def main(argv: list[str] | None = None) -> int:
                                 bias_by_res=bias_by_res_all,
                             )["S"][0]
 
+                        emitted = (primary,) if args.isolated_chain else (primary, partner)
                         designed = {
-                            c: sequence_from_indices(sampled, positions[c])
-                            for c in (primary, partner)
+                            c: sequence_from_indices(sampled, positions[c]) for c in emitted
                         }
-                        if args.native_partner:
+                        if args.native_partner and not args.isolated_chain:
                             designed[partner] = native_seq[partner]
 
-                        for this, other in ((primary, partner), (partner, primary)):
+                        pairs = (
+                            ((primary, partner),)
+                            if args.isolated_chain
+                            else ((primary, partner), (partner, primary))
+                        )
+                        for this, other in pairs:
                             sequence = designed[this]
                             design_rows.append(
                                 {
