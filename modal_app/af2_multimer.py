@@ -409,6 +409,53 @@ def estimate_cost(
 # ---------------------------------------------------------------------------
 
 
+def split_plan(jobs: list[Job], colab_max_residues: int = 700) -> dict[str, Any]:
+    """Cost the division of labour between a free T4 and paid A100 time.
+
+    AlphaFold-Multimer compute grows roughly with the square of total length,
+    so this set is heavily top weighted: a handful of large complexes carry most
+    of the bill. They are also exactly the ones a 16 GB card cannot hold.
+
+    The two facts point the same way. Give the free GPU the many small jobs,
+    where it is slow but costs nothing, and spend money only on the few large
+    ones that have nowhere else to go. This reports what that costs, and what
+    fraction of the science each side carries, since the split is only
+    acceptable if the expensive half is small.
+
+    Cost shares use length squared. That is a rule of thumb, not a measurement,
+    and it is used here only to divide a total, never to predict one.
+    """
+    per_complex: dict[str, int] = {}
+    for job in jobs:
+        per_complex.setdefault(job.pdb_id, job.total_residues())
+    if not per_complex:
+        return {"n_complexes": 0}
+
+    weight = {pdb: float(length) ** 2 for pdb, length in per_complex.items()}
+    total_weight = sum(weight.values())
+    small = {p for p, n in per_complex.items() if n <= colab_max_residues}
+    large = set(per_complex) - small
+
+    colab_jobs = [j for j in jobs if j.pdb_id in small]
+    modal_jobs = [j for j in jobs if j.pdb_id in large]
+
+    return {
+        "colab_max_residues": colab_max_residues,
+        "colab": {
+            "n_complexes": len(small),
+            "n_jobs": len(colab_jobs),
+            "cost_share": sum(weight[p] for p in small) / total_weight,
+        },
+        "modal": {
+            "n_complexes": len(large),
+            "n_jobs": len(modal_jobs),
+            "cost_share": sum(weight[p] for p in large) / total_weight,
+            "complexes": sorted(large, key=lambda p: -per_complex[p]),
+            "estimated_usd": estimate_cost(len(modal_jobs))["estimated_usd"] if modal_jobs else 0.0,
+        },
+    }
+
+
 def order_canary_first(jobs: list[Job], n_canary: int = 5) -> list[Job]:
     """Put the largest complexes first, then everything else deterministically.
 
@@ -1076,6 +1123,9 @@ if MODAL_AVAILABLE:  # pragma: no cover - requires Modal
         yes: bool = False,
         pilot: int = 0,
         pilot_betas: int = 2,
+        min_residues: int = 0,
+        max_residues: int = 0,
+        only_betas: str = "",
     ) -> None:
         """Launch the grid in waves, largest complexes first, gated between waves.
 
@@ -1107,6 +1157,45 @@ if MODAL_AVAILABLE:  # pragma: no cover - requires Modal
         outstanding = [job for job in jobs if job.key not in done]
 
         print(f"{len(jobs)} job(s) total, {len(done)} already complete, {len(outstanding)} to run")
+
+        # Size and charge filters, for splitting the grid across backends.
+        #
+        # AlphaFold-Multimer compute grows roughly with the square of total
+        # length, so this set is very top heavy: the five largest complexes are
+        # about 39 percent of the whole bill and the ten largest about 55. Those
+        # same complexes are the ones a 16 GB card cannot fit at all.
+        #
+        # That makes the division of labour obvious rather than arbitrary. A
+        # free T4 runs the many small jobs, where it is slow but costs nothing,
+        # and paid A100 time is spent only on the few large ones that have no
+        # other home. --min-residues is what makes Modal pick up exactly what
+        # Colab recorded as too large.
+        before = len(outstanding)
+        if min_residues:
+            outstanding = [j for j in outstanding if j.total_residues() >= min_residues]
+        if max_residues:
+            outstanding = [j for j in outstanding if j.total_residues() <= max_residues]
+        if only_betas:
+            wanted = {float(b) for b in only_betas.replace(" ", "").split(",")}
+            outstanding = [j for j in outstanding if j.beta in wanted]
+
+        if len(outstanding) != before:
+            bounds = []
+            if min_residues:
+                bounds.append(f"at least {min_residues} residues")
+            if max_residues:
+                bounds.append(f"at most {max_residues} residues")
+            if only_betas:
+                bounds.append(f"beta in {sorted(wanted)}")
+            print(
+                f"filtered to {len(outstanding)} job(s) over "
+                f"{len({j.pdb_id for j in outstanding})} complex(es): {', '.join(bounds)}.\n"
+                f"{before - len(outstanding)} job(s) excluded here; run them elsewhere or "
+                "record the shortfall."
+            )
+        if not outstanding:
+            print("nothing left to run under those filters")
+            return
         if not outstanding:
             print("nothing to do")
             return
@@ -1657,6 +1746,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="Cost the same grid across every GPU type with a recorded rate.",
     )
     parser.add_argument(
+        "--split-plan",
+        type=int,
+        nargs="?",
+        const=700,
+        default=None,
+        metavar="MAX_RESIDUES",
+        help=(
+            "Cost splitting the grid between a free GPU and paid A100 time, with "
+            "complexes at or below MAX_RESIDUES going to the free one. Default 700, "
+            "which is about what a 16 GB card holds."
+        ),
+    )
+    parser.add_argument(
         "--budget-usd",
         type=float,
         default=122.0,
@@ -1729,6 +1831,29 @@ def main(argv: list[str] | None = None) -> int:
         print(f"unique complexes:     {len({job.pdb_id for job in jobs})}")
         print(f"unique beta values:   {sorted({job.beta for job in jobs})}")
         print(f"replicates per point: {sorted({job.replicate for job in jobs})}")
+
+    if args.split_plan is not None and target and not isinstance(target, int):
+        plan = split_plan(target, args.split_plan)
+        colab, modal_side = plan["colab"], plan["modal"]
+        print(f"\n=== split at {plan['colab_max_residues']} residues ===")
+        print(
+            f"  free GPU:  {colab['n_jobs']:>4} job(s) over {colab['n_complexes']:>2} complex(es), "
+            f"{colab['cost_share']:.0%} of the compute, no cost"
+        )
+        print(
+            f"  paid A100: {modal_side['n_jobs']:>4} job(s) over "
+            f"{modal_side['n_complexes']:>2} complex(es), "
+            f"{modal_side['cost_share']:.0%} of the compute, "
+            f"about ${modal_side['estimated_usd']:.2f}"
+        )
+        if modal_side["complexes"]:
+            print(f"  paid complexes: {', '.join(modal_side['complexes'])}")
+        print(
+            "\n  Run the free side first with notebooks/af2_colab.ipynb, which caps\n"
+            "  itself at what the card holds and records anything larger as skipped.\n"
+            f"  Then pick up the remainder here with --min-residues {plan['colab_max_residues'] + 1}.\n"
+            "  Both write the same metrics and tag their source, so the two halves pool."
+        )
 
     if args.compare_gpus:
         print(f"\n{'GPU':<12} {'USD/hr':>7} {'GPU-h':>8} {'cost':>9} {'wall-clock':>11}")
