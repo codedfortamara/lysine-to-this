@@ -122,6 +122,11 @@ JAX_PACKAGE: str = "jax[cuda12]==0.4.28"
 #: colabfold 1.5.5 declares ``requires_python >=3.9,<3.12``.
 IMAGE_PYTHON_VERSION: str = "3.11"
 
+#: The AlphaFold parameter release. One constant: the weights downloaded into
+#: the volume and the model requested at prediction time must be the same set,
+#: and a mismatch is a wasted download followed by a failed run.
+MODEL_TYPE: str = "alphafold2_multimer_v3"
+
 #: Identifies this project to the free MMseqs2 server. ColabFold warns when it
 #: is unset and says the warning will become an error, and it is basic courtesy
 #: on a shared public resource.
@@ -824,7 +829,7 @@ if MODAL_AVAILABLE:  # pragma: no cover - requires Modal
             result_dir=str(out_dir),
             num_models=PARAMS.num_models,
             num_recycles=PARAMS.num_recycles,
-            model_type="alphafold2_multimer_v3",
+            model_type=MODEL_TYPE,
             msa_mode="single_sequence",
             use_templates=False,
             random_seed=PARAMS.random_seed,
@@ -942,6 +947,69 @@ if MODAL_AVAILABLE:  # pragma: no cover - requires Modal
             query_seqs_cardinality=[1] * len(chain_order),
         )
 
+    @app.function(
+        image=image,
+        volumes={WEIGHTS_PATH: weights_volume},
+        timeout=3600,
+    )
+    def populate_weights() -> dict:
+        """Download the AlphaFold parameters into the weights volume. Run once.
+
+        ColabFold's ``run()`` never downloads parameters; only its command line
+        entry point does. So the volume has to be filled before any prediction,
+        and an empty volume means every GPU job fails after allocation.
+
+        Done here rather than with ``modal volume put`` because the download
+        happens on Modal's network straight into the volume, instead of several
+        gigabytes coming down to a laptop and going back up again.
+
+        No GPU is requested: this is a download, and paying A100 rates to wait on
+        a file transfer would be careless.
+        """
+        import time
+
+        from colabfold.download import download_alphafold_params
+
+        target = Path(WEIGHTS_PATH)
+        marker = target / "params" / "download_complexes_multimer_v3_finished.txt"
+        if marker.is_file():
+            existing = sorted(p.name for p in (target / "params").glob("*.npz"))
+            return {"already_present": True, "n_param_files": len(existing)}
+
+        started = time.time()
+        download_alphafold_params(MODEL_TYPE, target)
+        weights_volume.commit()
+
+        files = sorted((target / "params").glob("*.npz"))
+        if not files:
+            raise RuntimeError(
+                f"no parameter files landed in {target / 'params'} after the "
+                "download reported success. Refusing to report a populated "
+                "volume that would fail on the first prediction."
+            )
+        return {
+            "already_present": False,
+            "n_param_files": len(files),
+            "total_gb": round(sum(f.stat().st_size for f in files) / 1e9, 2),
+            "seconds": round(time.time() - started, 1),
+        }
+
+    @app.local_entrypoint()
+    def setup() -> None:
+        """One-time: fill the weights volume. Safe to re-run, it checks first."""
+        print(f"populating {PARAMS.weights_volume} with {MODEL_TYPE} parameters")
+        print("this runs on Modal's network, on CPU, and is a one-off")
+        result = populate_weights.remote()
+        if result.get("already_present"):
+            print(f"already populated: {result['n_param_files']} parameter file(s), nothing to do")
+        else:
+            print(
+                f"downloaded {result['n_param_files']} parameter file(s), "
+                f"{result['total_gb']} GB, in {result['seconds']}s"
+            )
+        print("\nnow run the pilot:")
+        print("  modal run modal_app/af2_multimer.py --pilot 4")
+
     @app.local_entrypoint()
     def run(
         designs: str = "data/raw/designs.csv",
@@ -966,6 +1034,20 @@ if MODAL_AVAILABLE:  # pragma: no cover - requires Modal
         the rest. Its results stay on the volume and count towards the grid, so
         a pilot is never wasted work.
         """
+        # Checked before anything is dispatched. An empty weights volume fails
+        # every job, and it fails them after the containers have started and the
+        # GPUs have been allocated, which is the expensive place to find out.
+        if not weights_present():
+            print(
+                f"\nThe weights volume {PARAMS.weights_volume!r} has no AlphaFold "
+                "parameters in it.\nColabFold does not download them at prediction "
+                "time, so every job would fail\nafter its GPU was allocated. Populate "
+                "it first, once:\n\n"
+                "  modal run modal_app/af2_multimer.py::setup\n\n"
+                "That runs on CPU, on Modal's network, and takes a few minutes."
+            )
+            return
+
         jobs = build_job_list(Path(designs), Path(definitions), Path(test_set))
         done = completed_keys()
         outstanding = [job for job in jobs if job.key not in done]
@@ -1115,6 +1197,19 @@ if MODAL_AVAILABLE:  # pragma: no cover - requires Modal
                         "and the run is resumable: relaunch and finished jobs are skipped."
                     )
                     break
+
+    def weights_present() -> bool:
+        """Are the AlphaFold parameters actually in the weights volume?
+
+        Checked from the launcher, before any container starts, because the
+        alternative is discovering it once every GPU in the wave has been
+        allocated and every job has failed identically.
+        """
+        try:
+            names = {Path(entry.path).name for entry in weights_volume.listdir("/params")}
+        except (FileNotFoundError, GeneratorExit):
+            return False
+        return any(name.endswith(".npz") for name in names)
 
     def completed_keys() -> set[str]:
         """Job keys already present on the results volume."""
