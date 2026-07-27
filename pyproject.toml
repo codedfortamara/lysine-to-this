@@ -16,11 +16,17 @@ dependencies = [
     "biopython>=1.83",
     "numpy>=1.26",
     "pandas>=2.2",
-    "freesasa>=2.2.1",
     "matplotlib>=3.8",
 ]
 
 [project.optional-dependencies]
+# freesasa is a compiled C extension whose Windows wheels are unreliable, and a
+# source build there needs an MSVC toolchain. It is genuinely optional: the
+# default SASA backend is Biopython's Shrake-Rupley, and interface.py imports
+# freesasa lazily only when interface.sasa_backend is set to "freesasa".
+# Install it when you want the Lee-Richards cross-check, not to run the pipeline.
+freesasa = ["freesasa>=2.2.1"]
+
 # Kept out of the default install so that the analysis environment stays light.
 # Only needed on the machine that launches the Modal jobs.
 modal = ["modal>=0.64"]
