@@ -13,6 +13,12 @@ results/*
 figures/*
 !figures/.gitkeep
 
+# Your own working files. Drafts, prompts to other tools, notes to
+# collaborators, anything half-finished. None of it is part of the method and
+# none of it should travel to Mohammed's repo on a merge, so the whole
+# directory stays out of git.
+local/
+
 # Modal
 .modal/
 modal_output/
