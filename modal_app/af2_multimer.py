@@ -17,6 +17,11 @@ bill. Populate the volume once, out of band::
     modal volume create af2-weights
     modal volume put af2-weights /path/to/params /params
 
+The volume mounts at ``/weights`` and is passed to ColabFold as ``data_dir``,
+which resolves parameters at ``data_dir/params``. ColabFold's ``run()`` never
+downloads them; only its command line entry point does, so if they are absent
+the job fails rather than quietly fetching several gigabytes per container.
+
 **The run is resumable.** Every job writes its output to the results volume as
 soon as it completes, and the job list is filtered against what is already
 there before anything launches. A run that is interrupted, hits a quota, or is
@@ -116,6 +121,60 @@ JAX_PACKAGE: str = "jax[cuda12]==0.4.28"
 
 #: colabfold 1.5.5 declares ``requires_python >=3.9,<3.12``.
 IMAGE_PYTHON_VERSION: str = "3.11"
+
+#: Identifies this project to the free MMseqs2 server. ColabFold warns when it
+#: is unset and says the warning will become an error, and it is basic courtesy
+#: on a shared public resource.
+MMSEQS_USER_AGENT: str = "interface-charge-rcsb/1.0 (AF2-Multimer charge study)"
+
+
+def require_parseable_complex_a3m(a3m: str, chain_lengths: list[int]) -> None:
+    """Refuse an alignment ColabFold would quietly reinterpret.
+
+    ColabFold's ``unserialize_msa`` checks that the first line begins with ``#``
+    and splits into exactly two tab-separated fields. If it does not, it does
+    **not** raise: it falls through to a single-sequence branch and returns an
+    alignment of depth one. Every downstream number then looks normal while the
+    MSA has been discarded, which on this grid would mean paying for the whole
+    run and reporting results the run did not actually produce.
+
+    Silent reinterpretation is the failure mode worth spending code on, so the
+    header is checked here against the same conditions, and against the chain
+    lengths the alignment claims to describe.
+    """
+    lines = a3m.replace("\x00", "").splitlines()
+    if len(lines) < 3:
+        raise ValueError(
+            f"the assembled a3m has {len(lines)} line(s); ColabFold requires at "
+            "least three (header, query name, query sequence)."
+        )
+    header = lines[0]
+    if not header.startswith("#"):
+        raise ValueError(
+            f"the a3m header is {header[:40]!r}. ColabFold expects it to start "
+            "with '#', and silently treats anything else as a single sequence."
+        )
+    fields = header[1:].split("\t")
+    if len(fields) != 2:
+        raise ValueError(
+            f"the a3m header splits into {len(fields)} tab-separated field(s), "
+            "expected exactly two (lengths, cardinalities). ColabFold would "
+            "discard the alignment rather than reject it."
+        )
+    declared = [int(v) for v in fields[0].split(",")]
+    if declared != list(chain_lengths):
+        raise ValueError(
+            f"the a3m header declares chain lengths {declared} but the job's "
+            f"chains are {list(chain_lengths)}. The alignment would be sliced "
+            "against the wrong residues."
+        )
+    cardinality = [int(v) for v in fields[1].split(",")]
+    if len(cardinality) != len(declared):
+        raise ValueError(
+            f"the a3m header declares {len(declared)} chain length(s) but "
+            f"{len(cardinality)} cardinality value(s)."
+        )
+
 
 #: Repository packages the container needs, over and above this file.
 #:
@@ -745,14 +804,23 @@ if MODAL_AVAILABLE:  # pragma: no cover - requires Modal
         query_sequence = ":".join(job.chains[c] for c in ordered)
 
         modes = msa_plan(job)
-        a3m_lines = build_mixed_a3m(job, ordered, modes, cache_dir=Path(RESULTS_PATH) / "msa_cache")
+        a3m = build_mixed_a3m(job, ordered, modes, cache_dir=Path(RESULTS_PATH) / "msa_cache")
+        require_parseable_complex_a3m(a3m, [len(job.chains[c]) for c in ordered])
 
         colabfold_run(
             # Passing the alignment directly is what makes the mixed treatment
             # possible. ColabFold's own ``msa_mode`` switch is all-or-nothing
             # across the complex, so going through it would force either an MSA
             # for the design or no MSA for the partner, and both are wrong.
-            queries=[(job.key, query_sequence, a3m_lines)],
+            #
+            # The alignment goes in as a one-element LIST, not a bare string.
+            # ColabFold indexes it as ``a3m_lines[0]``, so a string yields its
+            # first character, "#", which fails the complex-a3m check and falls
+            # through to a single-sequence fallback. That path does not raise:
+            # it would have run the whole grid against an empty alignment and
+            # returned confident-looking numbers with the MSA silently
+            # discarded.
+            queries=[(job.key, query_sequence, [a3m])],
             result_dir=str(out_dir),
             num_models=PARAMS.num_models,
             num_recycles=PARAMS.num_recycles,
@@ -762,6 +830,12 @@ if MODAL_AVAILABLE:  # pragma: no cover - requires Modal
             random_seed=PARAMS.random_seed,
             is_complex=True,
             rank_by="multimer",
+            # ColabFold's run() never downloads parameters; only its command
+            # line entry point does. Without this it looks in its default data
+            # directory, finds nothing, and fails. The weights volume is the
+            # whole reason cold starts are affordable.
+            data_dir=WEIGHTS_PATH,
+            user_agent=MMSEQS_USER_AGENT,
         )
 
         native_path = Path(RESULTS_PATH) / "natives" / f"{job.pdb_id}.pdb"
@@ -841,6 +915,7 @@ if MODAL_AVAILABLE:  # pragma: no cover - requires Modal
                 use_filter=True,
                 use_templates=False,
                 use_pairing=False,
+                user_agent=MMSEQS_USER_AGENT,
             )
             lines = result[0] if isinstance(result, list | tuple) else result
             if not lines or ">" not in lines:
