@@ -1234,6 +1234,22 @@ if MODAL_AVAILABLE:  # pragma: no cover - requires Modal
                     )
                     break
 
+    #: What a Modal volume raises when a path is not there.
+    #:
+    #: Not ``FileNotFoundError``. Modal raises its own ``NotFoundError`` from
+    #: the gRPC layer, and catching only the built-in means "this path is
+    #: absent", the ordinary case on a fresh or partly populated volume, comes
+    #: out as a crash. That is what happened here: leftover directories from a
+    #: failed run had no ``metrics.json`` in them, and probing for it took the
+    #: launcher down before a single job was dispatched.
+    #:
+    #: Imported from ``modal.exception`` directly. ``modal/__init__.py``
+    #: re-exports only the ``Error`` base class, so ``modal.exception.NotFoundError``
+    #: is not reachable as an attribute of ``modal`` without this import.
+    from modal.exception import NotFoundError as _ModalNotFound
+
+    VOLUME_MISSING = (FileNotFoundError, StopIteration, GeneratorExit, _ModalNotFound)
+
     def weights_present() -> bool:
         """Are the AlphaFold parameters actually in the weights volume?
 
@@ -1243,25 +1259,34 @@ if MODAL_AVAILABLE:  # pragma: no cover - requires Modal
         """
         try:
             names = {Path(entry.path).name for entry in weights_volume.listdir("/params")}
-        except (FileNotFoundError, GeneratorExit):
+        except VOLUME_MISSING:
             return False
         return any(name.endswith(".npz") for name in names)
 
     def completed_keys() -> set[str]:
-        """Job keys already present on the results volume."""
+        """Job keys already present on the results volume.
+
+        A directory alone does not count. A job that started and died leaves its
+        output directory behind, and treating that as complete would skip the
+        work permanently and quietly shrink the grid. Only a written
+        ``metrics.json`` marks a job as done, which is also why it is the last
+        thing ``predict`` writes.
+        """
         keys: set[str] = set()
         try:
-            for entry in results_volume.listdir("/", recursive=False):
-                name = Path(entry.path).name
-                if name == "natives":
-                    continue
-                try:
-                    next(iter(results_volume.listdir(f"/{name}/metrics.json")))
-                except (FileNotFoundError, StopIteration, GeneratorExit):
-                    continue
-                keys.add(name)
-        except (FileNotFoundError, GeneratorExit):
+            entries = list(results_volume.listdir("/", recursive=False))
+        except VOLUME_MISSING:
             return set()
+
+        for entry in entries:
+            name = Path(entry.path).name
+            if name in {"natives", "msa_cache"}:
+                continue
+            try:
+                next(iter(results_volume.listdir(f"/{name}/metrics.json")))
+            except VOLUME_MISSING:
+                continue
+            keys.add(name)
         return keys
 
 else:  # pragma: no cover
