@@ -592,3 +592,197 @@ def test_known_residue_codes_decode() -> None:
     regen = _regen_module()
     indices = [regen.MPNN_ALPHABET.index(aa) for aa in "MKVDE"]
     assert regen.sequence_from_indices(indices, list(range(5))) == "MKVDE"
+
+
+# ---------------------------------------------------------------------------
+# Wave planning, canary ordering and the budget guard
+# ---------------------------------------------------------------------------
+
+
+def _af2():
+    sys.path.insert(0, str(REPO_ROOT / "modal_app"))
+    import af2_multimer
+
+    return af2_multimer
+
+
+def _job(af2, pdb_id="1BRS", beta=0.0, replicate=0, primary_len=100, partner_len=100):
+    return af2.Job(
+        pdb_id=pdb_id,
+        beta=beta,
+        replicate=replicate,
+        designed_chain="A",
+        chains={"A": "M" * primary_len, "D": "M" * partner_len},
+        msa_mode={"A": "single_sequence", "D": "msa"},
+    )
+
+
+def test_canary_puts_the_largest_complexes_first() -> None:
+    """Out-of-memory and timeout track total length, so the biggest go first."""
+    af2 = _af2()
+    jobs = [_job(af2, pdb_id=f"1BR{i}", primary_len=50 * i) for i in range(1, 7)]
+    ordered = af2.order_canary_first(jobs, n_canary=3)
+    sizes = [j.total_residues() for j in ordered[:3]]
+    assert sizes == sorted(sizes, reverse=True)
+    assert min(sizes) > max(j.total_residues() for j in ordered[3:])
+
+
+def test_canary_preserves_every_job() -> None:
+    af2 = _af2()
+    jobs = [_job(af2, pdb_id=f"1BR{i}", primary_len=50 * i) for i in range(1, 7)]
+    ordered = af2.order_canary_first(jobs, n_canary=2)
+    assert sorted(j.key for j in ordered) == sorted(j.key for j in jobs)
+
+
+def test_canary_ordering_is_deterministic() -> None:
+    """A resumed run must process outstanding work in the same order."""
+    af2 = _af2()
+    jobs = [_job(af2, pdb_id=f"1BR{i}", primary_len=100) for i in range(1, 8)]
+    first = [j.key for j in af2.order_canary_first(jobs, 3)]
+    second = [j.key for j in af2.order_canary_first(list(reversed(jobs)), 3)]
+    assert first == second
+
+
+def test_zero_canary_is_allowed() -> None:
+    af2 = _af2()
+    jobs = [_job(af2, pdb_id=f"1BR{i}") for i in range(1, 4)]
+    assert len(af2.order_canary_first(jobs, 0)) == 3
+
+
+def test_waves_are_cut_by_beta_so_each_stop_is_a_complete_grid() -> None:
+    """Stopping after wave one must leave every complex covered at those betas."""
+    af2 = _af2()
+    jobs = [
+        _job(af2, pdb_id=f"1BR{c}", beta=b)
+        for c in range(1, 5)
+        for b in (0.0, -1.5, 1.5, -3.0, 3.0)
+    ]
+    waves = af2.split_into_waves(jobs, af2.WAVE_BETAS)
+    assert len(waves) == 2
+    assert {j.beta for j in waves[0]} == {0.0, -1.5, 1.5}
+    assert {j.beta for j in waves[1]} == {-3.0, 3.0}
+    # Every complex appears in wave one: that is what makes it analysable alone.
+    assert {j.pdb_id for j in waves[0]} == {f"1BR{c}" for c in range(1, 5)}
+
+
+def test_no_job_is_dropped_by_a_mis_specified_wave_plan() -> None:
+    af2 = _af2()
+    jobs = [_job(af2, beta=b, replicate=i) for i, b in enumerate((0.0, 7.7, -3.0))]
+    waves = af2.split_into_waves(jobs, [[0.0]])
+    assert sum(len(w) for w in waves) == 3
+    assert any(j.beta == 7.7 for w in waves for j in w)
+
+
+def test_budget_guard_permits_work_within_the_ceiling() -> None:
+    af2 = _af2()
+    guard = af2.BudgetGuard(ceiling_usd=100.0, usd_per_gpu_hour=2.10)
+    assert guard.may_start(10, minutes_per_job=8.0)
+    assert guard.spent_usd == 0.0
+
+
+def test_budget_guard_refuses_to_start_beyond_the_ceiling() -> None:
+    af2 = _af2()
+    guard = af2.BudgetGuard(ceiling_usd=1.0, usd_per_gpu_hour=2.10)
+    assert not guard.may_start(100, minutes_per_job=8.0)
+
+
+def test_budget_guard_uses_measured_time_once_it_has_any() -> None:
+    """The planning assumption is only used until real numbers arrive."""
+    af2 = _af2()
+    guard = af2.BudgetGuard(ceiling_usd=100.0, usd_per_gpu_hour=2.10)
+    assert guard.observed_minutes_per_job() is None
+    for _ in range(4):
+        guard.record(120.0)  # two minutes each, far under the 8 minute assumption
+    assert guard.observed_minutes_per_job() == pytest.approx(2.0)
+    # At two minutes a job, a batch that the assumption would have blocked fits.
+    assert guard.may_start(200, minutes_per_job=8.0)
+
+
+def test_budget_guard_accumulates_spend() -> None:
+    af2 = _af2()
+    guard = af2.BudgetGuard(ceiling_usd=100.0, usd_per_gpu_hour=3600.0)
+    guard.record(1.0)
+    assert guard.spent_usd == pytest.approx(1.0)
+    guard.record(2.0)
+    assert guard.spent_usd == pytest.approx(3.0)
+    assert guard.remaining_usd == pytest.approx(97.0)
+
+
+def test_budget_guard_cannot_report_negative_remaining() -> None:
+    af2 = _af2()
+    guard = af2.BudgetGuard(ceiling_usd=1.0, usd_per_gpu_hour=3600.0)
+    guard.record(10.0)
+    assert guard.remaining_usd == 0.0
+
+
+def test_budget_guard_has_no_way_to_cancel_running_work() -> None:
+    """The guard gates dispatch only, by design.
+
+    Killing in-flight work wastes what has already been paid for in that batch
+    and leaves a partial grid, which is worse than a bounded overshoot.
+    """
+    af2 = _af2()
+    guard = af2.BudgetGuard(ceiling_usd=1.0, usd_per_gpu_hour=2.10)
+    for forbidden in ("cancel", "kill", "abort", "terminate", "stop"):
+        assert not hasattr(guard, forbidden)
+
+
+def test_invalid_ceiling_raises() -> None:
+    af2 = _af2()
+    for bad in (0.0, -5.0):
+        with pytest.raises(ValueError, match="ceiling_usd"):
+            af2.BudgetGuard(ceiling_usd=bad, usd_per_gpu_hour=2.10)
+
+
+def test_chunking_covers_everything_exactly_once() -> None:
+    af2 = _af2()
+    items = list(range(47))
+    chunks = af2.chunked(items, 20)
+    assert [len(c) for c in chunks] == [20, 20, 7]
+    assert [x for c in chunks for x in c] == items
+
+
+def test_chunk_size_must_be_positive() -> None:
+    af2 = _af2()
+    with pytest.raises(ValueError, match="chunk size"):
+        af2.chunked([1, 2, 3], 0)
+
+
+def test_wave_report_counts_failures_without_raising() -> None:
+    """A partly failed wave is still informative; the decision is a person's."""
+    af2 = _af2()
+    guard = af2.BudgetGuard(100.0, 2.10)
+    results = [
+        {"interface_ptm": 0.80, "wall_clock_s": 300.0},
+        {"interface_ptm": 0.60, "wall_clock_s": 360.0},
+        RuntimeError("CUDA out of memory"),
+    ]
+    report = af2.summarise_wave(1, results, guard)
+    assert report.n_jobs == 3
+    assert report.n_succeeded == 2
+    assert report.n_failed == 1
+    assert report.success_rate == pytest.approx(2 / 3)
+    assert report.median_interface_ptm == pytest.approx(0.70)
+    assert report.median_wall_clock_minutes == pytest.approx(5.5)
+    assert "CUDA out of memory" in report.failures[0]
+
+
+def test_wave_report_survives_missing_metrics() -> None:
+    af2 = _af2()
+    report = af2.summarise_wave(1, [{"key": "x"}], af2.BudgetGuard(100.0, 2.10))
+    assert report.median_interface_ptm is None
+    assert "unavailable" in report.render()
+
+
+def test_wave_report_of_all_failures_reports_zero_not_an_error() -> None:
+    af2 = _af2()
+    report = af2.summarise_wave(1, [RuntimeError("boom")] * 4, af2.BudgetGuard(100.0, 2.10))
+    assert report.success_rate == 0.0
+    assert report.n_succeeded == 0
+
+
+def test_wave_one_covers_the_band_where_the_science_is() -> None:
+    """Beta +/-3 is deferred: upstream shows only 10-17 percent fold there at all."""
+    af2 = _af2()
+    assert af2.WAVE_BETAS[0] == [0.0, -1.5, 1.5]
+    assert af2.WAVE_BETAS[1] == [-3.0, 3.0]

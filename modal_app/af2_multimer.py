@@ -76,6 +76,14 @@ except ImportError:  # pragma: no cover
 
 PARAMS: AF2Params = DEFAULT_CONFIG.af2
 
+#: How the grid is cut into waves, by beta. The usable band goes first because
+#: that is where the science is: at beta = +/-3 the upstream data shows only 10
+#: to 17 percent of designs folding at all, so refolding them complex-aware
+#: mostly confirms that a broken monomer is still broken. Ordering this way means
+#: that if the budget runs out after wave one, what remains is a complete grid
+#: over the interesting range rather than a partial grid over everything.
+WAVE_BETAS: list[list[float]] = [[0.0, -1.5, 1.5], [-3.0, 3.0]]
+
 #: Per-call timeout in seconds. One constant, referenced everywhere.
 TIMEOUT_S: int = PARAMS.timeout_s
 
@@ -253,6 +261,193 @@ def estimate_cost(
 
 
 # ---------------------------------------------------------------------------
+# Wave planning, canary ordering and the budget guard
+# ---------------------------------------------------------------------------
+
+
+def order_canary_first(jobs: list[Job], n_canary: int = 5) -> list[Job]:
+    """Put the largest complexes first, then everything else deterministically.
+
+    The failures that cost real money are out-of-memory and timeout, and both
+    are driven by total complex length. Running the largest jobs first surfaces
+    those failures within the first few minutes, when abandoning the run costs
+    pennies, instead of at job 120 when it costs most of a wave.
+
+    The remainder is ordered by identifier rather than by size, so that a resumed
+    run processes the outstanding work in the same order every time and the
+    progress output is comparable between runs.
+    """
+    if n_canary < 0:
+        raise ValueError(f"n_canary must not be negative, got {n_canary}")
+    by_size = sorted(jobs, key=lambda j: (-j.total_residues(), j.key))
+    canary = by_size[:n_canary]
+    rest = sorted(by_size[n_canary:], key=lambda j: j.key)
+    return canary + rest
+
+
+def split_into_waves(jobs: list[Job], wave_betas: list[list[float]]) -> list[list[Job]]:
+    """Group jobs into waves by beta value.
+
+    Waves are cut by beta rather than by complex so that every stopping point is
+    a complete, analysable grid: stopping after wave one leaves every complex
+    covered at the betas that wave contained, rather than some complexes covered
+    at every beta and others not covered at all.
+
+    Any job whose beta appears in no wave is returned as a final wave, so nothing
+    is silently dropped by a mis-specified plan.
+    """
+    remaining = list(jobs)
+    waves: list[list[Job]] = []
+    for betas in wave_betas:
+        wanted = {round(b, 6) for b in betas}
+        wave = [j for j in remaining if round(j.beta, 6) in wanted]
+        remaining = [j for j in remaining if round(j.beta, 6) not in wanted]
+        waves.append(wave)
+    if remaining:
+        waves.append(remaining)
+    return waves
+
+
+class BudgetGuard:
+    """Tracks spend and refuses to *start* work beyond a ceiling.
+
+    Deliberately incapable of stopping a job that is already running. Killing
+    work mid-flight wastes everything already paid for in that batch and leaves a
+    partial grid, which is worse than a small overshoot. The guard therefore
+    gates dispatch only: in-flight jobs always finish, and the overshoot is
+    bounded by one chunk.
+
+    Spend is estimated from observed wall-clock, so it becomes more accurate as
+    the run proceeds and does not depend on the planning assumption after the
+    first few jobs have returned.
+    """
+
+    def __init__(self, ceiling_usd: float, usd_per_gpu_hour: float) -> None:
+        if ceiling_usd <= 0:
+            raise ValueError(f"ceiling_usd must be positive, got {ceiling_usd}")
+        self.ceiling_usd = ceiling_usd
+        self.usd_per_gpu_hour = usd_per_gpu_hour
+        self.gpu_seconds = 0.0
+        self.n_recorded = 0
+
+    def record(self, wall_clock_s: float) -> None:
+        """Account for one completed job."""
+        self.gpu_seconds += max(0.0, float(wall_clock_s))
+        self.n_recorded += 1
+
+    @property
+    def spent_usd(self) -> float:
+        return self.gpu_seconds / 3600.0 * self.usd_per_gpu_hour
+
+    @property
+    def remaining_usd(self) -> float:
+        return max(0.0, self.ceiling_usd - self.spent_usd)
+
+    def observed_minutes_per_job(self) -> float | None:
+        """Measured median-free mean, or None before anything has returned."""
+        if not self.n_recorded:
+            return None
+        return self.gpu_seconds / self.n_recorded / 60.0
+
+    def may_start(self, n_jobs: int, minutes_per_job: float) -> bool:
+        """Whether a chunk of ``n_jobs`` fits inside what is left."""
+        observed = self.observed_minutes_per_job()
+        minutes = observed if observed is not None else minutes_per_job
+        projected = n_jobs * minutes / 60.0 * self.usd_per_gpu_hour
+        return projected <= self.remaining_usd
+
+    def status(self) -> str:
+        observed = self.observed_minutes_per_job()
+        measured = (
+            f", {observed:.1f} min/job measured over {self.n_recorded}"
+            if observed is not None
+            else ", no jobs measured yet"
+        )
+        return (
+            f"spent ${self.spent_usd:.2f} of ${self.ceiling_usd:.2f} "
+            f"(${self.remaining_usd:.2f} left{measured})"
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class WaveReport:
+    """What a wave produced, in the terms needed to decide whether to continue."""
+
+    wave: int
+    n_jobs: int
+    n_succeeded: int
+    n_failed: int
+    median_interface_ptm: float | None
+    median_wall_clock_minutes: float | None
+    spent_usd: float
+    failures: tuple[str, ...]
+
+    @property
+    def success_rate(self) -> float:
+        return self.n_succeeded / self.n_jobs if self.n_jobs else 0.0
+
+    def render(self) -> str:
+        iptm = (
+            f"{self.median_interface_ptm:.3f}"
+            if self.median_interface_ptm is not None
+            else "unavailable"
+        )
+        minutes = (
+            f"{self.median_wall_clock_minutes:.1f}"
+            if self.median_wall_clock_minutes is not None
+            else "unavailable"
+        )
+        lines = [
+            f"=== wave {self.wave} complete ===",
+            f"  jobs:                 {self.n_jobs}",
+            f"  succeeded:            {self.n_succeeded} ({self.success_rate:.1%})",
+            f"  failed:               {self.n_failed}",
+            f"  median interface pTM: {iptm}",
+            f"  median minutes/job:   {minutes}",
+            f"  spend this run:       ${self.spent_usd:.2f}",
+        ]
+        if self.failures:
+            lines.append(f"  first failures:       {list(self.failures[:5])}")
+        return "\n".join(lines)
+
+
+def summarise_wave(wave: int, results: list, guard: BudgetGuard) -> WaveReport:
+    """Build a report from a wave's returned metrics.
+
+    Exceptions are counted as failures rather than raised. A wave that partly
+    failed is still informative, and the decision about whether to continue
+    belongs to a person looking at the numbers.
+    """
+    import statistics as _statistics
+
+    succeeded = [r for r in results if isinstance(r, dict)]
+    failed = [r for r in results if not isinstance(r, dict)]
+
+    iptm = [float(r["interface_ptm"]) for r in succeeded if r.get("interface_ptm") is not None]
+    minutes = [
+        float(r["wall_clock_s"]) / 60.0 for r in succeeded if r.get("wall_clock_s") is not None
+    ]
+
+    return WaveReport(
+        wave=wave,
+        n_jobs=len(results),
+        n_succeeded=len(succeeded),
+        n_failed=len(failed),
+        median_interface_ptm=_statistics.median(iptm) if iptm else None,
+        median_wall_clock_minutes=_statistics.median(minutes) if minutes else None,
+        spent_usd=guard.spent_usd,
+        failures=tuple(f"{type(f).__name__}: {f}"[:200] for f in failed),
+    )
+
+
+def chunked(items: list, size: int) -> list[list]:
+    """Split a list into fixed-size chunks, the unit the budget guard gates on."""
+    if size <= 0:
+        raise ValueError(f"chunk size must be positive, got {size}")
+    return [items[i : i + size] for i in range(0, len(items), size)]
+
+
+# ---------------------------------------------------------------------------
 # Modal application
 # ---------------------------------------------------------------------------
 
@@ -365,25 +560,95 @@ if MODAL_AVAILABLE:  # pragma: no cover - requires Modal
         designs: str = "data/raw/designs.csv",
         test_set: str = "data/raw/test_set.csv",
         definitions: str = "results/interface_definitions.json",
+        budget_usd: float = 122.0,
+        wave: int = 0,
+        chunk_size: int = 20,
+        n_canary: int = 5,
+        yes: bool = False,
     ) -> None:
-        """Launch the full grid, skipping anything already done."""
+        """Launch the grid in waves, largest complexes first, gated between waves.
+
+        ``wave=0`` runs every wave in sequence, stopping for approval after each.
+        ``wave=N`` runs only wave N, which is how you resume after stopping.
+        ``yes=True`` skips the approval prompts, for an unattended run.
+        """
         jobs = build_job_list(Path(designs), Path(definitions), Path(test_set))
         done = completed_keys()
         outstanding = [job for job in jobs if job.key not in done]
 
-        estimate = estimate_cost(outstanding)
         print(f"{len(jobs)} job(s) total, {len(done)} already complete, {len(outstanding)} to run")
-        print(json.dumps(estimate, indent=2))
-
         if not outstanding:
             print("nothing to do")
             return
 
-        results = list(predict.map([asdict(job) for job in outstanding], return_exceptions=True))
-        failures = [r for r in results if isinstance(r, Exception)]
-        print(f"\n{len(results) - len(failures)} succeeded, {len(failures)} failed")
-        for failure in failures[:10]:
-            print(f"  {type(failure).__name__}: {failure}")
+        waves = split_into_waves(outstanding, WAVE_BETAS)
+        guard = BudgetGuard(budget_usd, PARAMS.usd_per_gpu_hour)
+
+        print(f"\nplan: {len(waves)} wave(s), ceiling ${budget_usd:.2f}")
+        for index, wave_jobs in enumerate(waves, start=1):
+            if not wave_jobs:
+                continue
+            betas = sorted({j.beta for j in wave_jobs})
+            cost = estimate_cost(len(wave_jobs))["estimated_usd"]
+            print(f"  wave {index}: {len(wave_jobs):>4} jobs, beta {betas}, about ${cost:.0f}")
+
+        for index, wave_jobs in enumerate(waves, start=1):
+            if not wave_jobs or (wave and index != wave):
+                continue
+
+            ordered = order_canary_first(wave_jobs, n_canary)
+            print(f"\n{'=' * 60}\nwave {index}: {len(ordered)} job(s)")
+            print(
+                f"canary: the {n_canary} largest complexes go first, up to "
+                f"{ordered[0].total_residues()} residues. If this wave is going to hit "
+                "an out-of-memory or a timeout, it will do it in the next few minutes."
+            )
+
+            results: list = []
+            for batch_number, batch in enumerate(chunked(ordered, chunk_size), start=1):
+                if not guard.may_start(len(batch), PARAMS.estimated_minutes_per_job):
+                    print(
+                        f"\nBUDGET STOP before batch {batch_number}: {guard.status()}.\n"
+                        f"Starting {len(batch)} more job(s) would exceed the ceiling. "
+                        "Nothing in flight was cancelled.\n"
+                        "Raise --budget-usd to continue, or collect what has finished."
+                    )
+                    break
+
+                print(f"\n  batch {batch_number}: {len(batch)} job(s) | {guard.status()}")
+                batch_results = list(
+                    predict.map([asdict(job) for job in batch], return_exceptions=True)
+                )
+                for result in batch_results:
+                    if isinstance(result, dict) and result.get("wall_clock_s") is not None:
+                        guard.record(result["wall_clock_s"])
+                results.extend(batch_results)
+
+            report = summarise_wave(index, results, guard)
+            print("\n" + report.render())
+
+            if report.success_rate < 0.5 and report.n_jobs:
+                print(
+                    "\nWARNING: more than half of this wave failed. Investigate before "
+                    "spending anything further; a systematic failure will repeat."
+                )
+
+            remaining_waves = [w for i, w in enumerate(waves, start=1) if i > index and w]
+            if wave or not remaining_waves:
+                break
+            if not yes:
+                print(
+                    f"\nNext wave is {len(remaining_waves[0])} job(s), about "
+                    f"${estimate_cost(len(remaining_waves[0]))['estimated_usd']:.0f}. "
+                    f"{guard.status()}"
+                )
+                answer = input("Continue to the next wave? [y/N] ").strip().lower()
+                if answer != "y":
+                    print(
+                        f"Stopped after wave {index}. Everything completed is on the volume "
+                        "and the run is resumable: relaunch and finished jobs are skipped."
+                    )
+                    break
 
     def completed_keys() -> set[str]:
         """Job keys already present on the results volume."""

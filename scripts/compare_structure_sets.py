@@ -38,13 +38,52 @@ def sha256(path: Path) -> str:
 
 
 def index(directory: Path, suffixes: tuple[str, ...]) -> dict[str, Path]:
-    """Map upper-case stem to path, for every structure file found at any depth."""
+    """Map upper-case stem to path, for every structure file found at any depth.
+
+    Gzipped structures are matched too, since a downloaded archive often keeps
+    them compressed, and their stem has the compression suffix stripped so that
+    ``1ABC.pdb.gz`` and ``1ABC.pdb`` compare as the same identifier.
+    """
     found: dict[str, Path] = {}
-    for suffix in suffixes:
-        for path in directory.rglob(f"*{suffix}"):
-            if path.is_file():
-                found.setdefault(path.stem.upper(), path)
+    for path in sorted(directory.rglob("*")):
+        if not path.is_file():
+            continue
+        name = path.name
+        stem = path.stem if not name.lower().endswith(".gz") else Path(path.stem).stem
+        if any(name.lower().endswith(s) or name.lower().endswith(s + ".gz") for s in suffixes):
+            found.setdefault(stem.upper(), path)
     return found
+
+
+def describe_directory(directory: Path, suffixes: tuple[str, ...]) -> str:
+    """Explain what is actually in a directory that yielded no structures.
+
+    An empty result has several quite different causes (wrong folder, an extra
+    nesting level from an archive, files still showing as OneDrive placeholders,
+    an unexpected extension) and they are indistinguishable from a bare count of
+    zero. Listing what is really there names the cause immediately.
+    """
+    entries = sorted(directory.rglob("*"))
+    files = [e for e in entries if e.is_file()]
+    subdirs = [e for e in entries if e.is_dir()]
+
+    lines = [
+        f"  no files matching {list(suffixes)} (or their .gz forms) under {directory}",
+        f"  found {len(files)} file(s) and {len(subdirs)} subdirector(y/ies) in total",
+    ]
+    if subdirs:
+        lines.append(f"  subdirectories: {[d.name for d in subdirs[:8]]}")
+    if files:
+        lines.append(f"  example file names: {[f.name for f in files[:8]]}")
+        extensions = sorted({f.suffix.lower() for f in files if f.suffix})
+        lines.append(f"  extensions present: {extensions[:12]}")
+    else:
+        lines.append(
+            "  the directory contains no files at all. If it is inside OneDrive, the "
+            "contents may not be downloaded yet: right-click the folder and choose "
+            "'Always keep on this device', then re-run."
+        )
+    return "\n".join(lines)
 
 
 def coordinate_lines(path: Path) -> list[str]:
@@ -80,13 +119,26 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
 
+    args.left = Path(str(args.left).strip())
+    args.right = Path(str(args.right).strip())
+
     for label, directory in (("--left", args.left), ("--right", args.right)):
         if not directory.is_dir():
             print(f"ERROR: {label} is not a directory: {directory}", file=sys.stderr)
             return 2
 
-    left = index(args.left, tuple(args.suffixes))
-    right = index(args.right, tuple(args.suffixes))
+    suffixes = tuple(s.lower() for s in args.suffixes)
+    left = index(args.left, suffixes)
+    right = index(args.right, suffixes)
+
+    for label, directory, found in (
+        ("--left", args.left, left),
+        ("--right", args.right, right),
+    ):
+        if not found:
+            print(f"ERROR: {label} yielded no structures.", file=sys.stderr)
+            print(describe_directory(directory, suffixes), file=sys.stderr)
+            return 2
 
     shared = sorted(set(left) & set(right))
     only_left = sorted(set(left) - set(right))
