@@ -241,6 +241,45 @@ output actually contains, and writing the aggregation before seeing the data
 would mean rewriting it afterwards. The analysis they will perform is specified;
 the code is not written.
 
+## Merging into the upstream repository
+
+This project is laid out to drop into the collaborator's repository as a single
+self-contained subdirectory, `rcsb_interface/`, with no file collisions and no
+changes to anything already there. Verified: 45 files placed, zero collisions,
+and the full test suite passes when run from inside the upstream checkout.
+
+Nesting works without code changes because every path in this project is derived
+relative to the package rather than hard-coded. `config.PROJECT_ROOT` resolves to
+whatever directory contains `src/`, so it becomes `rcsb_interface/` after the
+move, and the run manifests then record the *upstream* commit SHA, which is what
+you want once the work lives there.
+
+```bash
+git clone https://github.com/SyedMohammedSameer/ZetaDial.git
+cd ZetaDial
+git checkout -b rcsb-interface-charge
+mkdir rcsb_interface
+# copy this repository's tracked files, preserving structure
+(cd /path/to/this/repo && git ls-files) | while read -r f; do
+    mkdir -p "rcsb_interface/$(dirname "$f")"
+    cp "/path/to/this/repo/$f" "rcsb_interface/$f"
+done
+cd rcsb_interface && python -m pytest -q && cd ..
+git add rcsb_interface && git commit -m "Add RCSB interface-charge arm"
+```
+
+Two things worth knowing before merging:
+
+The upstream `.gitignore` contains a bare `figures/` pattern, which git applies
+at any depth, so `rcsb_interface/figures/` is ignored there as well. That matches
+this project's own intent, since figures are build products regenerated from a
+manifest, but it means an upstream clone will not carry them.
+
+Upstream script numbering has reached the thirties. This project's scripts live
+in `rcsb_interface/scripts/` and keep their own `00` to `11` numbering, so they
+do not collide, but if any are ever promoted to the upstream root they should be
+renumbered from `40` to leave room.
+
 ## Conventions
 
 Python 3.11, `uv` for dependencies, `ruff` for lint and format, type hints
