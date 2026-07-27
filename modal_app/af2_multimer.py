@@ -95,6 +95,28 @@ WAVE_BETAS: list[list[float]] = [[0.0, -1.5, 1.5], [-3.0, 3.0]]
 #: Per-call timeout in seconds. One constant, referenced everywhere.
 TIMEOUT_S: int = PARAMS.timeout_s
 
+#: Container dependencies, and the constraints they have to satisfy.
+#:
+#: These bounds belong to colabfold 1.5.5, which declares ``biopython<1.83``,
+#: ``numpy>=1.22.0,<2.0.0`` and ``jax>=0.4.20,<0.5.0``. Asking for anything
+#: outside them makes the image unresolvable, and the failure arrives several
+#: minutes into a build rather than at the call site.
+#:
+#: Kept at module level, outside the Modal guard, so a test can check the pins
+#: without Modal installed. The first version of this file asked for
+#: ``biopython>=1.83`` and ``numpy>=1.26``, both of which contradict the above,
+#: and nothing caught it until a real build failed.
+COLABFOLD_VERSION: str = "1.5.5"
+IMAGE_PACKAGES: list[str] = [
+    f"colabfold[alphafold]=={COLABFOLD_VERSION}",
+    "biopython<1.83",
+    "numpy>=1.22,<2.0",
+]
+JAX_PACKAGE: str = "jax[cuda12]==0.4.28"
+
+#: colabfold 1.5.5 declares ``requires_python >=3.9,<3.12``.
+IMAGE_PYTHON_VERSION: str = "3.11"
+
 
 # ---------------------------------------------------------------------------
 # Job enumeration. Pure Python, no Modal, so --dry-run always works.
@@ -652,17 +674,15 @@ def pairing_is_meaningful(modes: dict[str, str]) -> bool:
 
 if MODAL_AVAILABLE:  # pragma: no cover - requires Modal
     image = (
-        modal.Image.debian_slim(python_version="3.11")
+        modal.Image.debian_slim(python_version=IMAGE_PYTHON_VERSION)
         .apt_install("git", "wget", "build-essential")
         # ColabFold provides an AlphaFold2-Multimer implementation with a
         # single-sequence mode, which is what the redesigned chains need.
         .pip_install(
-            "colabfold[alphafold]==1.5.5",
-            "biopython>=1.83",
-            "numpy>=1.26",
+            *IMAGE_PACKAGES,
             extra_options="--extra-index-url https://storage.googleapis.com/jax-releases/jax_cuda_releases.html",
         )
-        .pip_install("jax[cuda12]==0.4.28")
+        .pip_install(JAX_PACKAGE)
         .env({"XLA_PYTHON_CLIENT_PREALLOCATE": "false", "TF_FORCE_UNIFIED_MEMORY": "1"})
     )
 
