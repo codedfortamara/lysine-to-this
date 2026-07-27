@@ -117,7 +117,29 @@ IMAGE_PACKAGES: list[str] = [
     "biopython<1.83",
     "numpy>=1.22,<2.0",
 ]
-JAX_PACKAGE: str = "jax[cuda12]==0.4.28"
+#: JAX is pinned by dm-haiku, not by colabfold, and this is the one that bites.
+#:
+#: colabfold 1.5.5 declares ``jax>=0.4.20,<0.5.0`` and ``dm-haiku==0.0.10``.
+#: Haiku 0.0.10 imports ``jax.linear_util``, which JAX removed in 0.4.24, so
+#: anything from 0.4.24 upwards satisfies colabfold's own bound and still dies
+#: at import with::
+#:
+#:     AttributeError: module 'jax' has no attribute 'linear_util'
+#:
+#: Checked against the published wheels: ``jax/linear_util.py`` is present in
+#: 0.4.20 through 0.4.23 and absent from 0.4.24 onwards. So 0.4.23 is the
+#: highest usable version, not a cautious choice.
+#:
+#: The extra matters as much as the version. At 0.4.23 the ``cuda12`` extra
+#: routes through the then-new plugin packages, while ``cuda12_pip`` pulls the
+#: monolithic ``jaxlib==0.4.23+cuda12.cudnn89`` wheel, which is the well-trodden
+#: path for this release and the one the jax-releases index actually carries a
+#: cp311 build of.
+JAX_PACKAGE: str = "jax[cuda12_pip]==0.4.23"
+
+#: Present in JAX up to and including this version, removed in the next. Haiku
+#: 0.0.10 needs it. Recorded so the constraint is checkable rather than folklore.
+JAX_MAX_WITH_LINEAR_UTIL: str = "0.4.23"
 
 #: colabfold 1.5.5 declares ``requires_python >=3.9,<3.12``.
 IMAGE_PYTHON_VERSION: str = "3.11"

@@ -25,6 +25,7 @@ from af2_multimer import (
     COLABFOLD_VERSION,
     IMAGE_PACKAGES,
     IMAGE_PYTHON_VERSION,
+    JAX_MAX_WITH_LINEAR_UTIL,
     JAX_PACKAGE,
     LOCAL_PYTHON_SOURCES,
 )
@@ -98,6 +99,42 @@ def test_the_jax_pin_sits_inside_colabfold_window() -> None:
     assert pinned, "jax should be pinned exactly, since the CUDA build must match"
     floor, ceiling = COLABFOLD_REQUIRES["jax"]
     assert as_tuple(floor) <= as_tuple(pinned[0]) < as_tuple(ceiling)
+
+
+def test_jax_is_old_enough_for_haiku() -> None:
+    """The constraint colabfold's own bound does not express, and which cost a run.
+
+    colabfold 1.5.5 pins dm-haiku==0.0.10, which imports jax.linear_util. JAX
+    removed that module in 0.4.24. So a version can satisfy colabfold's declared
+    jax>=0.4.20,<0.5.0 and still die at import with
+
+        AttributeError: module 'jax' has no attribute 'linear_util'
+
+    which is exactly what happened with 0.4.28. Verified against the published
+    wheels: jax/linear_util.py is present through 0.4.23 and gone from 0.4.24.
+    """
+    pinned = next(v for op, v in parse_pin(JAX_PACKAGE)[1] if op == "==")
+    assert as_tuple(pinned) <= as_tuple(JAX_MAX_WITH_LINEAR_UTIL), (
+        f"jax {pinned} is at or above 0.4.24, which removed jax.linear_util. "
+        f"dm-haiku 0.0.10 imports it, so every prediction will fail at import. "
+        f"The highest usable version is {JAX_MAX_WITH_LINEAR_UTIL}."
+    )
+
+
+def test_the_cuda_extra_pulls_a_gpu_build() -> None:
+    """At 0.4.23 the plain cuda12 extra is not the monolithic CUDA wheel.
+
+    cuda12_pip resolves to jaxlib==0.4.23+cuda12.cudnn89, which is the build the
+    jax-releases index carries a cp311 wheel for. Getting this wrong is not a
+    crash, it is a silent fall back to CPU, which on this grid means jobs that
+    take hours instead of minutes and a bill to match.
+    """
+    name, _ = parse_pin(JAX_PACKAGE)
+    assert name == "jax"
+    assert "[cuda12_pip]" in JAX_PACKAGE, (
+        f"{JAX_PACKAGE!r} does not request the cuda12_pip extra; a CPU jaxlib "
+        "would run but take orders of magnitude longer"
+    )
 
 
 def test_the_image_python_is_one_colabfold_supports() -> None:

@@ -52,6 +52,9 @@ SHARED_NAMES = [
 
 SOURCE = Path("modal_app/af2_multimer.py")
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "modal_app"))
+from af2_multimer import IMAGE_PACKAGES, JAX_PACKAGE
+
 
 def extract(source_path: Path, names: list[str]) -> str:
     """Pull the named top-level definitions out of a module, in file order."""
@@ -139,14 +142,19 @@ Results are written to `MyDrive/interface_charge/af2_results/`."""
 print(subprocess.run(["nvidia-smi"], capture_output=True, text=True).stdout)"""
         ),
         markdown(
-            "## 2. Install ColabFold\n\nTakes a few minutes. Pinned to match the Modal image."
+            "## 2. Install ColabFold\n\nTakes a few minutes. Pins generated from the "
+            "Modal image, so the two backends install the same stack."
         ),
         code(
-            """%%capture
-# Same pins as the Modal image. colabfold 1.5.5 requires biopython<1.83 and
-# numpy<2, so asking for anything newer makes the install unresolvable.
-!pip install -q "colabfold[alphafold]==1.5.5" "biopython<1.83" "numpy>=1.22,<2.0"
-!pip install -q "jax[cuda12]==0.4.28" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html"""
+            "%%capture\n"
+            "# Pins generated from modal_app/af2_multimer.py. Two of them are not\n"
+            "# preferences and must not be raised:\n"
+            "#   colabfold 1.5.5 requires biopython<1.83 and numpy<2\n"
+            "#   dm-haiku 0.0.10 imports jax.linear_util, removed in jax 0.4.24, so\n"
+            "#   jax must stay at or below 0.4.23 or every prediction dies at import\n"
+            f"!pip install -q {' '.join(chr(34) + p + chr(34) for p in IMAGE_PACKAGES)}\n"
+            f'!pip install -q "{JAX_PACKAGE}" '
+            "-f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html"
         ),
         markdown("## 3. Mount Drive and set paths"),
         code(
