@@ -7,7 +7,7 @@ name = "interface-charge-rcsb"
 version = "0.1.0"
 description = "Interface-resolved charge partitioning and complex-aware refolding for charge-controlled ProteinMPNN designs on RCSB complexes"
 readme = "README.md"
-requires-python = ">=3.11,<3.13"
+requires-python = ">=3.11,<3.14"
 license = { text = "MIT" }
 authors = [{ name = "Tamara Dinneen" }]
 keywords = ["protein design", "electrostatics", "protein-protein interface", "ProteinMPNN", "AlphaFold2-Multimer"]
