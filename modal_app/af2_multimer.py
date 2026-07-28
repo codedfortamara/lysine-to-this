@@ -359,6 +359,19 @@ def estimate_cost(
     """
     n_jobs = jobs if isinstance(jobs, int) else len(jobs)
     gpu_type = gpu_type or params.gpu_type
+
+    # Scale the measured per-job time by complex size when real jobs are given.
+    #
+    # AlphaFold attention is quadratic in sequence length, and this set spans
+    # 165 to 1257 residues, so one flat per-job figure cannot describe it. The
+    # measurement available is always the pessimistic one, because canary
+    # ordering runs the largest complexes first on purpose: 32.2 minutes came
+    # from jobs with a root-mean-square length of 905 against a grid median of
+    # 395. Applied flat that overstates this grid roughly fourfold.
+    size_factor = 1.0
+    if not isinstance(jobs, int) and jobs:
+        mean_square = sum(job.total_residues() ** 2 for job in jobs) / len(jobs)
+        size_factor = mean_square / (params.timing_reference_residues**2)
     rate = MODAL_GPU_RATES_USD_PER_HOUR.get(gpu_type)
     if rate is None:
         raise ValueError(
@@ -367,12 +380,24 @@ def estimate_cost(
         )
 
     containers = min(params.max_containers, n_jobs)
-    minutes_per_job = params.estimated_minutes_per_job + params.msa_overhead_minutes
+    minutes_per_job = (params.estimated_minutes_per_job * size_factor) + params.msa_overhead_minutes
     compute_hours = n_jobs * minutes_per_job / 60.0
     cold_start_hours = containers * params.cold_start_minutes / 60.0
-    gpu_hours = (compute_hours + cold_start_hours) * (1.0 + params.failure_overhead)
+    # Container time that belongs to no job and is not a cold start: containers
+    # held open waiting for the slowest job in a chunk. Invisible in every job's
+    # own wall clock, and about half the bill on the first real batch.
+    idle_hours = max(0.0, compute_hours * (params.billing_overhead - 1.0) - cold_start_hours)
+    gpu_hours = (compute_hours + cold_start_hours + idle_hours) * (1.0 + params.failure_overhead)
 
     out: dict[str, Any] = {
+        "idle_gpu_hours": idle_hours,
+        "billing_overhead": params.billing_overhead,
+        "size_factor": size_factor,
+        "size_factor_basis": (
+            "mean squared complex length against the size the per-job time was "
+            "measured at; 1.0 when only a job count was supplied, which is "
+            "pessimistic for this set"
+        ),
         "n_jobs": n_jobs,
         "gpu_type": gpu_type,
         "usd_per_gpu_hour": rate,
@@ -513,11 +538,22 @@ class BudgetGuard:
     first few jobs have returned.
     """
 
-    def __init__(self, ceiling_usd: float, usd_per_gpu_hour: float) -> None:
+    def __init__(
+        self,
+        ceiling_usd: float,
+        usd_per_gpu_hour: float,
+        billing_overhead: float = PARAMS.billing_overhead,
+    ) -> None:
         if ceiling_usd <= 0:
             raise ValueError(f"ceiling_usd must be positive, got {ceiling_usd}")
+        if billing_overhead < 1.0:
+            raise ValueError(
+                f"billing_overhead must be at least 1.0, got {billing_overhead}. "
+                "Below one it would claim Modal bills less than the jobs consume."
+            )
         self.ceiling_usd = ceiling_usd
         self.usd_per_gpu_hour = usd_per_gpu_hour
+        self.billing_overhead = billing_overhead
         self.gpu_seconds = 0.0
         self.n_recorded = 0
 
@@ -528,7 +564,16 @@ class BudgetGuard:
 
     @property
     def spent_usd(self) -> float:
-        return self.gpu_seconds / 3600.0 * self.usd_per_gpu_hour
+        """Estimated *billed* spend, not the sum of the jobs' own wall clocks.
+
+        The two differ by about a factor of two, and the difference is all
+        container time no job accounts for: image pulls, loading the model
+        parameters, and containers held idle waiting for the slowest job in a
+        chunk. Reporting the raw job total made this guard read $12.41 against
+        roughly $26.00 actually billed, so a ceiling set at $54 would not have
+        stopped anything until well past $100.
+        """
+        return self.gpu_seconds / 3600.0 * self.usd_per_gpu_hour * self.billing_overhead
 
     @property
     def remaining_usd(self) -> float:
@@ -544,7 +589,7 @@ class BudgetGuard:
         """Whether a chunk of ``n_jobs`` fits inside what is left."""
         observed = self.observed_minutes_per_job()
         minutes = observed if observed is not None else minutes_per_job
-        projected = n_jobs * minutes / 60.0 * self.usd_per_gpu_hour
+        projected = n_jobs * minutes / 60.0 * self.usd_per_gpu_hour * self.billing_overhead
         return projected <= self.remaining_usd
 
     def status(self) -> str:

@@ -730,12 +730,48 @@ def test_budget_guard_uses_measured_time_once_it_has_any() -> None:
 
 def test_budget_guard_accumulates_spend() -> None:
     af2 = _af2()
-    guard = af2.BudgetGuard(ceiling_usd=100.0, usd_per_gpu_hour=3600.0)
+    guard = af2.BudgetGuard(ceiling_usd=100.0, usd_per_gpu_hour=3600.0, billing_overhead=1.0)
     guard.record(1.0)
     assert guard.spent_usd == pytest.approx(1.0)
     guard.record(2.0)
     assert guard.spent_usd == pytest.approx(3.0)
     assert guard.remaining_usd == pytest.approx(97.0)
+
+
+def test_budget_guard_reports_billed_spend_not_job_time() -> None:
+    """The defect this exists for: a guard that under-reports by half.
+
+    It summed each job's own wall clock. Modal bills container time, which also
+    covers image pulls, loading the model parameters, and containers held idle
+    waiting for the slowest job in a chunk. On the first real batch that read
+    $12.41 against roughly $26.00 billed, so a ceiling set at $54 would not have
+    stopped anything until well past $100. A safeguard being wrong in this
+    direction is the only direction that matters.
+    """
+    af2 = _af2()
+    honest = af2.BudgetGuard(ceiling_usd=100.0, usd_per_gpu_hour=3600.0, billing_overhead=2.1)
+    naive = af2.BudgetGuard(ceiling_usd=100.0, usd_per_gpu_hour=3600.0, billing_overhead=1.0)
+    for guard in (honest, naive):
+        guard.record(10.0)
+    assert honest.spent_usd == pytest.approx(2.1 * naive.spent_usd)
+    assert honest.remaining_usd < naive.remaining_usd
+
+
+def test_budget_guard_projects_batches_at_the_billed_rate_too() -> None:
+    """Reporting honestly but gating naively would leave the hole open."""
+    af2 = _af2()
+    honest = af2.BudgetGuard(ceiling_usd=10.0, usd_per_gpu_hour=3600.0, billing_overhead=2.1)
+    naive = af2.BudgetGuard(ceiling_usd=10.0, usd_per_gpu_hour=3600.0, billing_overhead=1.0)
+    # A batch costing 6 units of job time is 12.6 billed, over the ceiling.
+    assert naive.may_start(6, minutes_per_job=1.0 / 60.0)
+    assert not honest.may_start(6, minutes_per_job=1.0 / 60.0)
+
+
+def test_a_billing_overhead_below_one_is_refused() -> None:
+    """It would claim Modal bills less than the jobs themselves consume."""
+    af2 = _af2()
+    with pytest.raises(ValueError, match="at least 1.0"):
+        af2.BudgetGuard(ceiling_usd=10.0, usd_per_gpu_hour=2.10, billing_overhead=0.5)
 
 
 def test_budget_guard_cannot_report_negative_remaining() -> None:

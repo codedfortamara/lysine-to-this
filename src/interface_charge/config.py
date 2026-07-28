@@ -323,7 +323,31 @@ class AF2Params:
     random_seed: int = 0
 
     #: Maximum number of containers Modal may run at once.
-    max_containers: int = 20
+    #:
+    #: Raised from 20 after the first real batch. Cost is unaffected by this
+    #: number, since the same GPU-seconds are bought either way, but wall clock
+    #: divides by it, and at the measured 32 minutes per job the full grid is
+    #: seven hours on twenty containers.
+    max_containers: int = 40
+
+    #: What Modal actually bills, divided by what the completed jobs account for.
+    #:
+    #: The budget guard sums each job's own wall clock. Modal bills *container*
+    #: time, which is a larger number: a container is paid for while it pulls
+    #: the image, while it loads the model parameters, and while it sits idle
+    #: waiting for the slowest job in a chunk to finish so the next chunk can
+    #: start. None of that appears in any job's wall clock.
+    #:
+    #: Measured, not assumed. The first real batch reported $12.41 of job time
+    #: against roughly $26.00 billed, giving 2.1. Without this factor the guard
+    #: under-reports by half, which is the worst possible direction for a
+    #: safeguard to be wrong in: it was set to stop at $54 and would have run
+    #: past $100.
+    #:
+    #: It is a floor rather than a typical case. The measurement came from a
+    #: chunk containing the five largest jobs in the grid, where idle time is
+    #: worst, so later chunks should pack better and come in below it.
+    billing_overhead: float = 2.1
 
     #: Extra GPU minutes per job attributable to running with an MSA rather than
     #: single-sequence. Two effects, both billed at the GPU rate because both
@@ -332,10 +356,18 @@ class AF2Params:
     #: share it, and the larger MSA representation AlphaFold then has to embed
     #: and recycle on every job.
     #:
-    #: A planning assumption, like estimated_minutes_per_job, and the single
-    #: number most worth replacing with a pilot measurement: it applies to every
-    #: job in the grid, so an error here scales straight into the bill.
-    msa_overhead_minutes: float = 3.0
+    #: Now zero, because the search no longer happens on the GPU.
+    #:
+    #: It used to: ``predict`` called run_mmseqs2 inline, and the wait against a
+    #: free shared server was billed at the A100 rate. Three jobs in the first
+    #: pilot hit the two-hour timeout sitting in that queue and produced
+    #: nothing. The searches moved to a CPU-only ``prefetch`` entrypoint, where
+    #: all 55 cost $0.86 including one that waited 15.5 minutes.
+    #:
+    #: What remains is the cost of embedding and recycling a larger MSA
+    #: representation, which is real but is part of the folding time now
+    #: measured directly rather than a separate addend.
+    msa_overhead_minutes: float = 0.0
 
     #: PAE below which a cross-chain residue pair counts towards ipSAE, in
     #: angstroms. Ten is the value used throughout Dunbrack (2025). The score is
@@ -359,10 +391,35 @@ class AF2Params:
     #: often, so this is a floor rather than a typical case.
     failure_overhead: float = 0.10
 
-    #: Wall-clock estimate per job in minutes, used only by the dry run. This
-    #: is a planning figure, not a measurement. Replace it with the observed
-    #: median after the first batch completes.
-    estimated_minutes_per_job: float = 8.0
+    #: Wall-clock estimate per job in minutes.
+    #:
+    #: No longer a planning figure. 32.2 minutes is the mean over the first
+    #: eleven completed jobs, reported by the budget guard on 28 July 2026.
+    #:
+    #: The previous value here was 8.0, and it was wrong by a factor of four.
+    #: That error went straight into a quoted cost of $55 for a grid that is
+    #: closer to $194, and the quote was acted on. The measurement replaces it.
+    #:
+    #: It is still an overestimate for the grid as a whole, because those eleven
+    #: jobs were the largest complexes in the set: canary ordering runs them
+    #: first on purpose, so the first measurement available is always the
+    #: pessimistic one. Compute grows roughly with the square of total length
+    #: and the median complex is 395 residues against 1257 for the largest.
+    estimated_minutes_per_job: float = 32.2
+
+    #: Total residues of the complex the 32.2 minutes above was measured on.
+    #:
+    #: Not a detail. AlphaFold attention is quadratic in sequence length, so a
+    #: per-job time is meaningless without the size it was measured at. Those
+    #: eleven jobs averaged 819,000 residues squared, a root-mean-square length
+    #: of 905, against a grid median of 395. Applying 32.2 minutes flat to every
+    #: job therefore overstates the grid by roughly a factor of four, which is
+    #: exactly the mistake made in the other direction an hour earlier.
+    #:
+    #: When ``estimate_cost`` is handed real jobs it rescales by the square of
+    #: the length ratio against this figure. Given only a job count it cannot,
+    #: and falls back to the flat number, which is pessimistic and says so.
+    timing_reference_residues: float = 905.0
 
     #: Name of the Modal Volume holding model weights.
     weights_volume: str = "af2-weights"
