@@ -323,3 +323,51 @@ def test_the_exploratory_link_refuses_too_few_complexes(tmp_path: Path, survival
     analysis.to_csv(path, index=False)
     report = survival.buffering_versus_survival(changes, path, seed=0)
     assert "not reported" in report["note"]
+
+
+def test_a_half_populated_control_is_refused(tmp_path: Path) -> None:
+    """The dangerous case: the control present on one backend and absent on the other.
+
+    A folded subset drawn only from the machine that happened to record pLDDT
+    differs from the full set by backend as much as by fold quality. That is a
+    confound wearing the costume of a control, and unlike a wholly missing
+    column it produces output that looks fine.
+    """
+    table = synthetic_metrics()
+    table.loc[table["beta"] < 0, "designed_chain_plddt"] = None
+    table["source"] = ["colab" if b < 0 else "modal" for b in table["beta"]]
+    metrics = tmp_path / "af2_metrics.csv"
+    table.to_csv(metrics, index=False)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT),
+            "--metrics",
+            str(metrics),
+            "--results-dir",
+            str(tmp_path / "results"),
+        ],
+        capture_output=True,
+        text=True,
+        cwd=REPO_ROOT,
+        timeout=300,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert "Traceback" not in result.stderr
+    assert "colab" in result.stderr, "the message should name which rows are short"
+
+
+def test_the_colab_notebook_records_the_same_control(tmp_path: Path) -> None:
+    """Two backends must not disagree about the primary control.
+
+    collect_metrics is not in the notebook's shared block, so a change on the
+    Modal side does not propagate and nothing else would catch it.
+    """
+    notebook = json.loads((REPO_ROOT / "notebooks" / "af2_colab.ipynb").read_text())
+    source = "\n".join(
+        "".join(cell["source"]) for cell in notebook["cells"] if cell["cell_type"] == "code"
+    )
+    assert '"designed_chain_plddt"' in source
+    assert '"partner_chain_plddt"' in source

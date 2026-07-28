@@ -346,7 +346,25 @@ for index, job in enumerate(jobs, start=1):
         scores = json.loads(scores_files[0].read_text())
         pae = np.array(scores.get("pae", []), dtype=float)
 
+        # Per-chain pLDDT, matching modal_app collect_metrics exactly.
+        #
+        # This is the fold-quality control for the whole AF2 arm: an interface
+        # score falls when the monomer collapses, and only the designed chain's
+        # own confidence separates the two. If Colab rows lacked it, the control
+        # would silently be computed over the Modal half of the grid alone.
+        plddt = np.array(scores.get("plddt", []), dtype=float)
+        chain_plddt = {}
+        if plddt.size == sum(lengths):
+            start = 0
+            for chain_id, length in zip(ordered, lengths):
+                chain_plddt[chain_id] = float(plddt[start:start + length].mean())
+                start += length
+
         metrics = {
+            "designed_chain_plddt": chain_plddt.get(job["designed_chain"]),
+            "partner_chain_plddt": next(
+                (v for c, v in chain_plddt.items() if c != job["designed_chain"]), None
+            ),
             "key": job["key"], "pdb_id": job["pdb_id"], "beta": job["beta"],
             "replicate": job["replicate"], "designed_chain": job["designed_chain"],
             "complex_ptm": float(scores["ptm"]) if "ptm" in scores else None,

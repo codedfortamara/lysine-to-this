@@ -337,6 +337,29 @@ def main(argv: list[str] | None = None) -> int:
             "interface from a broken monomer.",
             file=sys.stderr,
         )
+    else:
+        # Partial coverage is worse than none, and it will not announce itself.
+        #
+        # A grid split across backends can come back with the control populated
+        # on one side and empty on the other. The folded subset would then be
+        # silently drawn from whichever backend recorded it, and would differ
+        # from the full set by machine as much as by fold quality. That is a
+        # confound wearing the costume of a control.
+        blank = table["designed_chain_plddt"].isna()
+        if blank.any() and not blank.all():
+            sources = (
+                sorted(table.loc[blank, "source"].dropna().unique())
+                if "source" in table.columns
+                else ["unrecorded"]
+            )
+            fail(
+                f"{int(blank.sum())} of {len(table)} row(s) have no "
+                f"designed_chain_plddt, from {sources}, while the rest do.\n"
+                "The fold-quality subset would then be selected by which backend "
+                "ran the job as much as\nby whether the design folded. Re-collect "
+                "those jobs, or drop the column entirely and\nreport the "
+                "unfiltered result alone, but do not run this half and half."
+            )
 
     with run_manifest(
         script=Path(__file__),
