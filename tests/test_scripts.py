@@ -770,7 +770,7 @@ def test_budget_guard_projects_batches_at_the_billed_rate_too() -> None:
 def test_a_billing_overhead_below_one_is_refused() -> None:
     """It would claim Modal bills less than the jobs themselves consume."""
     af2 = _af2()
-    with pytest.raises(ValueError, match="at least 1.0"):
+    with pytest.raises(ValueError, match=r"at least 1\.0"):
         af2.BudgetGuard(ceiling_usd=10.0, usd_per_gpu_hour=2.10, billing_overhead=0.5)
 
 

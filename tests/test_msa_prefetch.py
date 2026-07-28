@@ -209,3 +209,75 @@ def test_the_recost_uses_folding_time_not_wall_clock() -> None:
     source = function_source("timings")
     assert "msa_overhead_minutes=0.0" in source
     assert "fold_seconds" in source
+
+
+# ---------------------------------------------------------------------------
+# Orchestration that does not depend on the launching machine
+# ---------------------------------------------------------------------------
+
+
+def test_the_grid_can_be_driven_from_inside_modal() -> None:
+    """The laptop was load bearing, and it failed three times in one evening.
+
+    ``run`` submits batch by batch from the client and holds the budget guard
+    in memory, so a dropped connection, a closed lid or a reboot stops the
+    grid. ``--detach`` keeps containers alive but not the loop that decides
+    what to start next, so it still halts at the end of the batch in flight.
+    """
+    source = function_source("drive")
+    assert "predict.map(" in source, "drive must dispatch the work itself"
+    assert "BudgetGuard(" in source, "the ceiling must be enforced beside the work"
+
+
+def test_the_driver_asks_for_no_gpu() -> None:
+    """It waits on other containers; paying A100 rates to do that is the old bug."""
+    tree = ast.parse(SOURCE)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "drive":
+            keywords = {k.arg for k in node.decorator_list[0].keywords}  # type: ignore[attr-defined]
+            assert "gpu" not in keywords
+            return
+    raise AssertionError("drive not found")
+
+
+def test_the_driver_outlives_the_whole_grid() -> None:
+    """A driver timing out mid-grid would strand the run with no orchestrator."""
+    tree = ast.parse(SOURCE)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "drive":
+            timeouts = [
+                k.value.value
+                for k in node.decorator_list[0].keywords  # type: ignore[attr-attr,attr-defined]
+                if k.arg == "timeout"
+            ]
+            assert timeouts and timeouts[0] >= 8 * 3600, (
+                f"drive times out after {timeouts}, which is inside the plausible "
+                "range for this grid"
+            )
+            return
+    raise AssertionError("drive not found")
+
+
+def test_the_launcher_spawns_rather_than_waits() -> None:
+    """.remote() would block the client and reintroduce the dependency."""
+    source = function_source("launch")
+    assert "drive.spawn(" in source
+    assert "drive.remote(" not in source
+
+
+def test_progress_survives_the_client_going_away() -> None:
+    """Status has to be readable from a machine that was switched off throughout."""
+    source = function_source("drive")
+    assert "progress.json" in source
+    assert "results_volume.commit()" in source
+    assert "publish(" in source
+
+    status_source = function_source("progress")
+    assert 'read_file("progress.json")' in status_source
+
+
+def test_the_launcher_checks_the_cache_before_spawning() -> None:
+    """Same reason as run: a cold cache means every job fails on the GPU path."""
+    source = function_source("launch")
+    assert "cached_alignments()" in source
+    assert source.index("cached_alignments()") < source.index("drive.spawn(")

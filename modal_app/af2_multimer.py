@@ -1226,6 +1226,100 @@ if MODAL_AVAILABLE:  # pragma: no cover - requires Modal
 
     @app.function(
         image=image,
+        volumes={RESULTS_PATH: results_volume},
+        # Long enough for the whole grid with room to spare. This container
+        # holds no GPU and costs pennies an hour, so a generous ceiling here is
+        # not a generous bill.
+        timeout=43200,
+    )
+    def drive(job_payloads: list[dict], budget_usd: float, chunk_size: int) -> dict:
+        """Run the whole grid from inside Modal, so no laptop is in the loop.
+
+        The local launcher submits work batch by batch and holds the budget
+        guard in memory. That makes a laptop part of the apparatus: a dropped
+        wifi connection, a closed lid or a reboot stops the grid, and on this
+        run it did so three times. ``--detach`` keeps the *containers* alive but
+        not the thing that decides what to start next, so the grid still halts
+        at the end of the batch in flight.
+
+        Moving the loop here removes the dependency entirely. The launcher
+        spawns this and exits; the run continues whether or not anything is
+        listening. Progress is written to the results volume after every batch,
+        so ``status`` can report on it from any machine at any time, including
+        one that was switched off while the work happened.
+
+        The budget guard and canary ordering are unchanged. They now run beside
+        the work rather than across an internet connection from it.
+        """
+        import time
+
+        jobs = [Job(**payload) for payload in job_payloads]
+        progress_path = Path(RESULTS_PATH) / "progress.json"
+        guard = BudgetGuard(budget_usd, PARAMS.usd_per_gpu_hour)
+        started = time.time()
+        completed = 0
+        failures: list[str] = []
+        stopped_early = ""
+
+        def publish(state: str) -> None:
+            progress_path.write_text(
+                json.dumps(
+                    {
+                        "state": state,
+                        "n_jobs": len(jobs),
+                        "n_completed_this_run": completed,
+                        "n_failed_this_run": len(failures),
+                        "spent_usd_estimated": round(guard.spent_usd, 2),
+                        "ceiling_usd": budget_usd,
+                        "observed_minutes_per_job": guard.observed_minutes_per_job(),
+                        "elapsed_minutes": round((time.time() - started) / 60.0, 1),
+                        "stopped_early": stopped_early,
+                        "recent_failures": failures[-5:],
+                    },
+                    indent=2,
+                    default=str,
+                )
+                + "\n"
+            )
+            results_volume.commit()
+
+        publish("running")
+
+        for wave_jobs in split_into_waves(jobs, WAVE_BETAS):
+            if not wave_jobs or stopped_early:
+                continue
+            ordered = order_canary_first(wave_jobs, n_canary=5)
+            for batch in chunked(ordered, chunk_size):
+                if not guard.may_start(len(batch), PARAMS.estimated_minutes_per_job):
+                    stopped_early = (
+                        f"budget ceiling ${budget_usd:.2f} reached; "
+                        f"{guard.status()}. Nothing in flight was cancelled."
+                    )
+                    break
+                for result in predict.map(
+                    [asdict(job) for job in batch],
+                    kwargs={"allow_msa_search": False},
+                    return_exceptions=True,
+                ):
+                    if isinstance(result, dict) and result.get("wall_clock_s") is not None:
+                        guard.record(result["wall_clock_s"])
+                        completed += 1
+                    else:
+                        failures.append(repr(result)[:200])
+                publish("running")
+
+        publish("finished")
+        return {
+            "n_completed_this_run": completed,
+            "n_failed_this_run": len(failures),
+            "spent_usd_estimated": round(guard.spent_usd, 2),
+            "observed_minutes_per_job": guard.observed_minutes_per_job(),
+            "elapsed_minutes": round((time.time() - started) / 60.0, 1),
+            "stopped_early": stopped_early,
+        }
+
+    @app.function(
+        image=image,
         volumes={WEIGHTS_PATH: weights_volume},
         timeout=3600,
     )
@@ -1330,6 +1424,97 @@ if MODAL_AVAILABLE:  # pragma: no cover - requires Modal
             )
         print("\nnow the grid can run with no network in the GPU containers:")
         print("  modal run modal_app/af2_multimer.py::run --pilot 4")
+
+    @app.local_entrypoint()
+    def launch(
+        designs: str = "data/raw/designs.csv",
+        test_set: str = "data/raw/test_set.csv",
+        definitions: str = "results/interface_definitions.json",
+        budget_usd: float = 250.0,
+        chunk_size: int = 20,
+        min_residues: int = 0,
+        max_residues: int = 0,
+        only_betas: str = "",
+    ) -> None:
+        """Start the grid on Modal and exit. Nothing needs to stay connected.
+
+        Use this rather than ``run`` when the machine launching it cannot be
+        relied on to stay awake and online for several hours, which on this
+        project turned out to be every time.
+        """
+        if not weights_present():
+            print(
+                f"The weights volume {PARAMS.weights_volume!r} is empty. Run "
+                "setup first:\n  modal run modal_app/af2_multimer.py::setup"
+            )
+            return
+
+        jobs = build_job_list(Path(designs), Path(definitions), Path(test_set))
+
+        cached = cached_alignments()
+        missing = [
+            f"{pdb} {chain}"
+            for pdb, chain, _ in searches_required(jobs)
+            if f"{pdb}_{chain}.a3m" not in cached
+        ]
+        if missing:
+            print(
+                f"{len(missing)} alignment(s) are not cached, starting with "
+                f"{missing[:5]}.\nFetch them on CPU first, it is the same search on a "
+                "machine that costs cents:\n  modal run modal_app/af2_multimer.py::prefetch"
+            )
+            return
+
+        done = completed_keys()
+        outstanding = [job for job in jobs if job.key not in done]
+        if min_residues:
+            outstanding = [j for j in outstanding if j.total_residues() >= min_residues]
+        if max_residues:
+            outstanding = [j for j in outstanding if j.total_residues() <= max_residues]
+        if only_betas:
+            wanted = {float(b) for b in only_betas.replace(" ", "").split(",")}
+            outstanding = [j for j in outstanding if j.beta in wanted]
+
+        print(f"{len(jobs)} job(s) in the grid, {len(done)} already on the volume")
+        if not outstanding:
+            print("nothing outstanding. Collect what is there:")
+            print("  modal volume get interface-charge-af2-results / ./modal_output")
+            return
+
+        estimate = estimate_cost(outstanding)
+        print(
+            f"{len(outstanding)} to run, about ${estimate['estimated_usd']:.0f} and "
+            f"{estimate['estimated_wall_clock_hours']:.1f} h wall clock, "
+            f"ceiling ${budget_usd:.2f}"
+        )
+
+        call = drive.spawn([asdict(job) for job in outstanding], budget_usd, chunk_size)
+        print(f"\nstarted on Modal as {call.object_id}")
+        print("This machine is no longer involved. Close the laptop, lose wifi, reboot.")
+        print("\ncheck on it any time, from anywhere:")
+        print("  modal run modal_app/af2_multimer.py::progress")
+
+    @app.local_entrypoint()
+    def progress() -> None:
+        """What the grid is doing, read from the volume rather than a live client."""
+        done = completed_keys()
+        print(f"{len(done)} job(s) complete on {PARAMS.results_volume}")
+
+        try:
+            blob = b"".join(results_volume.read_file("progress.json"))
+        except VOLUME_MISSING:
+            print("no progress.json yet; either nothing has been launched or the first")
+            print("batch has not finished. A launched run writes it after every batch.")
+            return
+
+        report = json.loads(blob)
+        print(json.dumps(report, indent=2))
+        if report.get("state") == "finished":
+            print("\nfinished. Collect it:")
+            print("  modal volume get interface-charge-af2-results / ./modal_output")
+            print("  python modal_app/collect.py --from-dir modal_output")
+        if report.get("stopped_early"):
+            print(f"\nstopped early: {report['stopped_early']}")
 
     @app.local_entrypoint()
     def timings() -> None:
