@@ -234,3 +234,96 @@ def test_interface_charge_is_the_package_actually_required() -> None:
     """Guards the test above against passing because both sides are empty."""
     assert "interface_charge" in repository_packages()
     assert "interface_charge" in top_level_imports()
+
+
+# ---------------------------------------------------------------------------
+# The silent CPU fallback
+# ---------------------------------------------------------------------------
+
+
+def test_cudnn_is_pinned_to_the_series_jaxlib_was_built_against() -> None:
+    """The failure that made every job ten times too slow and too expensive.
+
+    jaxlib 0.4.23+cuda12.cudnn89 is built against cuDNN 8.9, as its local
+    version tag says. Its declared requirement is nvidia-cudnn-cu12>=8.9 with
+    no upper bound, so pip installs the 9.x series and the loader cannot find
+    what it needs. Nothing raises. The container logs
+
+        CUDA backend failed to initialize: Unable to load cuDNN. Is it installed?
+
+    once, and JAX then runs the whole of AlphaFold on CPU while Modal bills for
+    an A100. Jobs took thirty minutes instead of three, the largest complexes
+    hit the two hour timeout having produced nothing, and every cost estimate
+    built on those timings was wrong by an order of magnitude.
+    """
+    from af2_multimer import CUDNN_PACKAGE
+
+    name, constraints = parse_pin(CUDNN_PACKAGE)
+    assert name == "nvidia-cudnn-cu12"
+    ceilings = [v for op, v in constraints if op in ("<", "<=")]
+    assert ceilings, (
+        "nvidia-cudnn-cu12 must have an upper bound. Without one pip takes 9.x, "
+        "which jaxlib 0.4.23+cuda12.cudnn89 cannot load, and the failure is "
+        "silent."
+    )
+    assert as_tuple(ceilings[0]) <= (9, 0)
+    floors = [v for op, v in constraints if op == ">="]
+    assert floors and as_tuple(floors[0]) >= (8, 9)
+
+
+def test_the_cudnn_pin_is_installed_alongside_jax() -> None:
+    """A pin in a constant that no layer installs would be decoration."""
+    import ast
+
+    source = (Path(__file__).resolve().parents[1] / "modal_app" / "af2_multimer.py").read_text()
+    tree = ast.parse(source)
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "pip_install"
+        ):
+            names = [a.id for a in node.args if isinstance(a, ast.Name)]
+            if "JAX_PACKAGE" in names:
+                assert "CUDNN_PACKAGE" in names, (
+                    "CUDNN_PACKAGE must be installed in the same layer as JAX_PACKAGE, "
+                    "so pip resolves them together"
+                )
+                return
+    raise AssertionError("no pip_install layer installs JAX_PACKAGE")
+
+
+def test_predict_refuses_to_fold_on_cpu() -> None:
+    """Ninety seconds of a dead container is cheap. Two hours of one is not."""
+    import ast
+
+    root = Path(__file__).resolve().parents[1]
+    source = (root / "modal_app" / "af2_multimer.py").read_text()
+    tree = ast.parse(source)
+    lines = source.splitlines()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "predict":
+            body = "\n".join(lines[node.lineno - 1 : node.end_lineno])
+            assert "require_gpu_backend()" in body
+            assert body.index("require_gpu_backend()") < body.index("colabfold_run("), (
+                "the check must run before any folding, not after"
+            )
+            return
+    raise AssertionError("predict not found")
+
+
+def test_the_gpu_check_looks_at_real_devices() -> None:
+    """An environment variable would say what was asked for, not what happened."""
+    import ast
+
+    root = Path(__file__).resolve().parents[1]
+    source = (root / "modal_app" / "af2_multimer.py").read_text()
+    tree = ast.parse(source)
+    lines = source.splitlines()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "require_gpu_backend":
+            body = "\n".join(lines[node.lineno - 1 : node.end_lineno])
+            assert "jax.devices()" in body
+            assert 'platform == "gpu"' in body
+            return
+    raise AssertionError("require_gpu_backend not found")

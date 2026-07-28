@@ -154,6 +154,31 @@ JAX_MAX_WITH_LINEAR_UTIL: str = "0.4.23"
 #: nor effective, and omitted it from the jax install, where it was essential.
 JAX_FIND_LINKS: str = "-f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html"
 
+#: cuDNN must be the 8.9 series, and nothing in the dependency graph says so.
+#:
+#: jaxlib 0.4.23+cuda12.cudnn89 is built against cuDNN 8.9, as the local version
+#: tag states. Its declared requirement is ``nvidia-cudnn-cu12>=8.9`` with no
+#: upper bound, so pip installs the 9.x series and the loader cannot find the
+#: symbols it wants. The result is not an error at install time and not a crash
+#: at run time. It is this, once, in the container log::
+#:
+#:     CUDA backend failed to initialize: Unable to load cuDNN. Is it installed?
+#:
+#: and then JAX quietly runs the whole of AlphaFold on CPU.
+#:
+#: That is the most expensive failure mode available here. Everything still
+#: works and every number is correct; it is simply tens of times slower, on a
+#: machine billed at 2.10 USD an hour. It is what turned three minute jobs into
+#: thirty minute ones, what made the largest complexes hit the two hour timeout
+#: having produced nothing, and what made every cost estimate built on those
+#: timings wrong.
+#:
+#: A silent fall back to a working-but-wrong configuration is exactly the class
+#: of failure this project refuses everywhere else. It should have been refused
+#: here too, and now is: the pin below forces the matching series, and predict
+#: checks at run time that a GPU is actually in use before folding anything.
+CUDNN_PACKAGE: str = "nvidia-cudnn-cu12>=8.9,<9.0"
+
 #: colabfold 1.5.5 declares ``requires_python >=3.9,<3.12``.
 IMAGE_PYTHON_VERSION: str = "3.11"
 
@@ -855,6 +880,35 @@ def msa_plan(job: Job) -> dict[str, str]:
     return modes
 
 
+def require_gpu_backend() -> None:
+    """Refuse to fold on CPU inside a container that is billed as a GPU.
+
+    JAX does not fail when its CUDA backend cannot initialise. It logs one line
+    and silently uses CPU. AlphaFold then runs correctly and tens of times more
+    slowly, on hardware costing 2.10 USD an hour, and the only symptom is the
+    invoice. That happened here: a cuDNN version mismatch sent an entire grid
+    to CPU, jobs that should have taken three minutes took thirty, the largest
+    complexes hit the two hour timeout without producing anything, and every
+    cost estimate derived from those timings was wrong.
+
+    A wrong-but-working configuration is the failure this project refuses
+    everywhere else, so it is refused here. Ninety seconds of a dead container
+    is cheap; two hours of one is not.
+    """
+    import jax
+
+    devices = jax.devices()
+    if not any(device.platform == "gpu" for device in devices):
+        raise RuntimeError(
+            "JAX has no GPU device; it would run AlphaFold on CPU at GPU prices.\n"
+            f"Devices visible: {devices}\n"
+            "Look in the container log for 'CUDA backend failed to initialize'. "
+            "The usual cause is a cuDNN series mismatch: jaxlib "
+            "0.4.23+cuda12.cudnn89 needs the 8.9 series, and its own dependency "
+            "declaration does not pin the upper bound, so pip installs 9.x."
+        )
+
+
 def searches_required(jobs: list[Job]) -> list[tuple[str, str, str]]:
     """Every distinct homology search the grid needs, as (pdb_id, chain, sequence).
 
@@ -919,7 +973,7 @@ if MODAL_AVAILABLE:  # pragma: no cover - requires Modal
         # JAX is separate because the CUDA-tagged jaxlib is not on PyPI and has
         # to be found on the jax-releases page. This is the install that needs
         # the find-links, and the one that was missing it.
-        .pip_install(JAX_PACKAGE, extra_options=JAX_FIND_LINKS)
+        .pip_install(JAX_PACKAGE, CUDNN_PACKAGE, extra_options=JAX_FIND_LINKS)
         .env({"XLA_PYTHON_CLIENT_PREALLOCATE": "false", "TF_FORCE_UNIFIED_MEMORY": "1"})
         # Ship the project's own package. Modal mounts the entrypoint module and
         # nothing else, so without this the container has af2_multimer.py and no
@@ -953,6 +1007,8 @@ if MODAL_AVAILABLE:  # pragma: no cover - requires Modal
         import time
 
         from colabfold.batch import run as colabfold_run
+
+        require_gpu_backend()
 
         job = Job(**job_payload)
         out_dir = Path(RESULTS_PATH) / job.key
