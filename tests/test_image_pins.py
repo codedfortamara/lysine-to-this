@@ -327,3 +327,32 @@ def test_the_gpu_check_looks_at_real_devices() -> None:
             assert 'platform == "gpu"' in body
             return
     raise AssertionError("require_gpu_backend not found")
+
+
+def test_unified_memory_is_not_enabled() -> None:
+    """It turns a ninety second failure into a two hour bill.
+
+    TF_FORCE_UNIFIED_MEMORY lets JAX spill past GPU memory into host RAM rather
+    than raising. On this grid that meant the largest complexes thrashed over
+    the PCIe bus for two hours at the A100 rate and hit the timeout having
+    written nothing, three separate times on the same complex. Failing fast is
+    the cheaper and more informative outcome: a job that cannot fit should be
+    excluded, not paid for repeatedly.
+    """
+    import ast
+
+    source = (Path(__file__).resolve().parents[1] / "modal_app" / "af2_multimer.py").read_text()
+    tree = ast.parse(source)
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "env"
+        ):
+            for keyword in ast.walk(node):
+                if isinstance(keyword, ast.Constant) and keyword.value == "TF_FORCE_UNIFIED_MEMORY":
+                    raise AssertionError(
+                        "TF_FORCE_UNIFIED_MEMORY is set on the image. Remove it: "
+                        "spilling to host RAM hides an out-of-memory failure "
+                        "behind hours of billed thrashing."
+                    )

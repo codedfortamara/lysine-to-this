@@ -974,7 +974,19 @@ if MODAL_AVAILABLE:  # pragma: no cover - requires Modal
         # to be found on the jax-releases page. This is the install that needs
         # the find-links, and the one that was missing it.
         .pip_install(JAX_PACKAGE, CUDNN_PACKAGE, extra_options=JAX_FIND_LINKS)
-        .env({"XLA_PYTHON_CLIENT_PREALLOCATE": "false", "TF_FORCE_UNIFIED_MEMORY": "1"})
+        # TF_FORCE_UNIFIED_MEMORY is deliberately absent.
+        #
+        # It lets JAX spill past GPU memory into host RAM instead of failing,
+        # which sounds like insurance and is not. It converts an out-of-memory
+        # crash costing ninety seconds into hours of thrashing over the PCIe
+        # bus, billed at the GPU rate, ending at the timeout with nothing
+        # written. When a job is too large the useful response is to find out
+        # immediately and exclude it, not to pay for it to fail slowly.
+        #
+        # The largest complex here is 1257 residues, which fits 40 GB for
+        # multimer inference. If that turns out to be wrong, this now says so in
+        # ninety seconds.
+        .env({"XLA_PYTHON_CLIENT_PREALLOCATE": "false"})
         # Ship the project's own package. Modal mounts the entrypoint module and
         # nothing else, so without this the container has af2_multimer.py and no
         # interface_charge to import from it. Local source is attached after the
