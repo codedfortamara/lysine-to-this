@@ -1,0 +1,325 @@
+"""The AF2 analysis, exercised on a synthetic table before any real grid exists.
+
+Written at the same time as the script it tests, and for the same reason: the
+analysis of the AlphaFold arm was fixed before the numbers arrived, so that no
+choice in it could be made to suit them. Tests are the only way to know it
+works until then, and "it ran on the real data" is not a thing that can be
+checked at 2am on the deadline.
+
+The synthetic table here is a fixture, not a result. It exists to drive code
+paths and its numbers are constructed to make a known answer come out.
+"""
+
+from __future__ import annotations
+
+import importlib.util
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+import pandas as pd
+import pytest
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+SCRIPT = REPO_ROOT / "scripts" / "12_af2_interface_survival.py"
+
+
+def load_module():
+    spec = importlib.util.spec_from_file_location("af2_survival", SCRIPT)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.fixture(scope="module")
+def survival():
+    return load_module()
+
+
+BETAS = [-3.0, -1.5, 0.0, 1.5, 3.0]
+
+
+def synthetic_metrics(
+    n_complexes: int = 12,
+    effect_per_unit_beta: float = -0.05,
+    plddt_at_extremes: float = 40.0,
+) -> pd.DataFrame:
+    """A grid where ipSAE falls linearly with |beta| and the extremes fold badly.
+
+    Both are put in deliberately: the first is the effect the primary endpoint
+    should recover, the second is the confound the fold-quality control exists
+    to separate from it.
+    """
+    rows = []
+    for index in range(n_complexes):
+        pdb_id = f"{index + 1}ABC"
+        # A large per-complex offset, so a test that accidentally drops the
+        # pairing fails loudly rather than approximately passing.
+        offset = 0.30 * index
+        for beta in BETAS:
+            folded = abs(beta) < 3.0
+            rows.append(
+                {
+                    "pdb_id": pdb_id,
+                    "designed_chain": "A",
+                    "replicate": 0,
+                    "beta": beta,
+                    "key": f"{pdb_id}_A_b{beta}_r0",
+                    "ipsae_d0res": 0.5 + offset + effect_per_unit_beta * abs(beta),
+                    "interface_ptm": 0.6 + offset,
+                    "interface_pae": 10.0 + abs(beta),
+                    "designed_chain_plddt": 85.0 if folded else plddt_at_extremes,
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+# ---------------------------------------------------------------------------
+# Pairing
+# ---------------------------------------------------------------------------
+
+
+def test_the_change_is_measured_against_the_same_complex(survival) -> None:
+    """The between-complex spread here is six times the effect being measured.
+
+    If the comparison were not paired, the offset would swamp it entirely.
+    """
+    changes = survival.paired_change(synthetic_metrics(), "ipsae_d0res")
+    at_three = changes[changes["beta"] == 3.0]["delta"]
+    assert at_three.std() < 1e-9, "paired deltas should be identical by construction"
+    assert at_three.mean() == pytest.approx(-0.15)
+
+
+def test_the_reference_rows_are_dropped(survival) -> None:
+    """Their delta is zero by construction, and keeping them dilutes every mean."""
+    changes = survival.paired_change(synthetic_metrics(), "ipsae_d0res")
+    assert (changes["beta"] != 0.0).all()
+
+
+def test_a_complex_with_no_reference_is_dropped_not_paired_elsewhere(survival) -> None:
+    """Pairing across complexes would be worse than dropping the row."""
+    table = synthetic_metrics()
+    table = table[~((table["pdb_id"] == "1ABC") & (table["beta"] == 0.0))]
+    changes = survival.paired_change(table, "ipsae_d0res")
+    assert "1ABC" not in set(changes["pdb_id"])
+    assert len(set(changes["pdb_id"])) == 11
+
+
+# ---------------------------------------------------------------------------
+# The primary endpoint
+# ---------------------------------------------------------------------------
+
+
+def test_the_primary_endpoint_is_fixed_in_advance(survival) -> None:
+    """One metric, named in the source, not chosen from the output."""
+    assert survival.PRIMARY_METRIC == "ipsae_d0res"
+    assert survival.PRIMARY_METRIC not in survival.SECONDARY_METRICS
+
+
+def test_it_recovers_an_effect_that_is_there(survival) -> None:
+    rows = survival.summarise_metric(synthetic_metrics(), "ipsae_d0res", seed=0, label="t")
+    at_three = next(r for r in rows if r["beta"] == 3.0)
+    assert at_three["mean_change_vs_beta0"] == pytest.approx(-0.15)
+    assert at_three["excludes_zero"]
+    assert at_three["fraction_degraded"] == 1.0
+
+
+def test_it_reports_no_effect_when_there_is_none(survival) -> None:
+    """The negative result has to be reportable, or the analysis only finds effects."""
+    rows = survival.summarise_metric(
+        synthetic_metrics(effect_per_unit_beta=0.0), "ipsae_d0res", seed=0, label="t"
+    )
+    assert all(not r["excludes_zero"] for r in rows)
+
+
+def test_degraded_means_worse_whichever_direction_the_metric_runs(survival) -> None:
+    """interface_pae rises as the interface gets worse; ipSAE falls."""
+    table = synthetic_metrics()
+    pae = survival.summarise_metric(table, "interface_pae", seed=0, label="t")
+    ipsae = survival.summarise_metric(table, "ipsae_d0res", seed=0, label="t")
+    assert next(r for r in pae if r["beta"] == 3.0)["lower_is_better"]
+    assert not next(r for r in ipsae if r["beta"] == 3.0)["lower_is_better"]
+    # Both got worse at beta = 3, so both should count every complex as degraded.
+    assert next(r for r in pae if r["beta"] == 3.0)["fraction_degraded"] == 1.0
+    assert next(r for r in ipsae if r["beta"] == 3.0)["fraction_degraded"] == 1.0
+
+
+def test_complexes_are_the_resampling_unit_not_rows(survival) -> None:
+    """Replicates within a complex are not independent draws.
+
+    Counting them as such would narrow every interval by roughly the square
+    root of the replicate count, for free and for nothing.
+    """
+    single = synthetic_metrics()
+    doubled = pd.concat([single, single.assign(replicate=1)], ignore_index=True)
+    rows_single = survival.summarise_metric(single, "ipsae_d0res", seed=0, label="t")
+    rows_doubled = survival.summarise_metric(doubled, "ipsae_d0res", seed=0, label="t")
+    for a, b in zip(rows_single, rows_doubled, strict=True):
+        assert a["n_complexes"] == b["n_complexes"]
+
+
+# ---------------------------------------------------------------------------
+# The confound
+# ---------------------------------------------------------------------------
+
+
+def test_the_fold_quality_subset_uses_the_designed_chain(survival) -> None:
+    """The complex mean is half native partner and would hide a collapsed design."""
+    source = SCRIPT.read_text()
+    assert "designed_chain_plddt" in source
+    assert 'table["mean_plddt"]' not in source
+
+
+def test_the_reading_distinguishes_a_broken_interface_from_a_broken_monomer(
+    survival,
+) -> None:
+    """All four outcomes are written out in advance, so none can be talked into."""
+    frame = pd.DataFrame(
+        [{"excludes_zero": True, "mean_change_vs_beta0": -0.2}],
+    )
+    none = pd.DataFrame([{"excludes_zero": False, "mean_change_vs_beta0": -0.01}])
+
+    assert "not explained by monomer quality" in survival.fold_quality_reading(frame, frame)
+    assert "breaking monomers rather than" in survival.fold_quality_reading(frame, none)
+    assert "collider" in survival.fold_quality_reading(none, frame)
+    assert "No measurable degradation" in survival.fold_quality_reading(none, none)
+
+
+def test_without_the_control_it_says_so_rather_than_concluding(survival) -> None:
+    reading = survival.fold_quality_reading(pd.DataFrame([{"a": 1}]), pd.DataFrame())
+    assert "cannot be distinguished" in reading
+
+
+# ---------------------------------------------------------------------------
+# Missing jobs
+# ---------------------------------------------------------------------------
+
+
+def test_a_depleted_beta_is_flagged(survival) -> None:
+    """Refolding failures concentrate at the extremes, so this will happen."""
+    table = synthetic_metrics()
+    drop = table[(table["beta"] == 3.0)].index[:8]
+    report = survival.completeness(table.drop(index=drop), expected_complexes=12)
+    assert 3.0 in report["betas_materially_depleted"]
+    assert not report["comparable_across_beta"]
+
+
+def test_a_complete_grid_is_not_flagged(survival) -> None:
+    report = survival.completeness(synthetic_metrics(), expected_complexes=12)
+    assert report["comparable_across_beta"]
+    assert report["betas_materially_depleted"] == []
+
+
+# ---------------------------------------------------------------------------
+# Refusals
+# ---------------------------------------------------------------------------
+
+
+def test_it_refuses_a_table_with_no_primary_endpoint(survival, tmp_path: Path) -> None:
+    """Silently falling back to ipTM would answer a different question."""
+    table = synthetic_metrics().drop(columns=["ipsae_d0res"])
+    path = tmp_path / "af2_metrics.csv"
+    table.to_csv(path, index=False)
+    with pytest.raises(KeyError, match="primary endpoint"):
+        survival.load_metrics(path)
+
+
+def test_it_refuses_a_table_it_cannot_pair(survival, tmp_path: Path) -> None:
+    table = synthetic_metrics().drop(columns=["designed_chain"])
+    path = tmp_path / "af2_metrics.csv"
+    table.to_csv(path, index=False)
+    with pytest.raises(KeyError, match="paired on"):
+        survival.load_metrics(path)
+
+
+def test_it_fails_cleanly_with_no_data_at_all(tmp_path: Path) -> None:
+    """The project rule: a useful message, not a traceback."""
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), "--metrics", str(tmp_path / "absent.csv")],
+        capture_output=True,
+        text=True,
+        cwd=REPO_ROOT,
+        timeout=300,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert "Traceback" not in result.stderr
+    assert "prefetch" in result.stderr, "the message should say how to produce the input"
+
+
+# ---------------------------------------------------------------------------
+# End to end
+# ---------------------------------------------------------------------------
+
+
+def test_it_runs_end_to_end_and_writes_a_manifest(tmp_path: Path) -> None:
+    metrics = tmp_path / "af2_metrics.csv"
+    synthetic_metrics().to_csv(metrics, index=False)
+    out = tmp_path / "results"
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT),
+            "--metrics",
+            str(metrics),
+            "--results-dir",
+            str(out),
+            "--analysis",
+            str(tmp_path / "absent.csv"),
+        ],
+        capture_output=True,
+        text=True,
+        cwd=REPO_ROOT,
+        timeout=300,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+    summary = json.loads((out / "af2_interface_survival_summary.json").read_text())
+    assert summary["primary_endpoint"] == "ipsae_d0res"
+    assert summary["primary_all_returned"]
+    assert summary["primary_folded_only"], "the fold-quality subset should be populated"
+    assert (out / "af2_interface_survival.csv").is_file()
+    assert (out / "af2_interface_survival.csv.manifest.json").is_file()
+
+
+def test_the_exploratory_link_is_labelled_as_exploratory(tmp_path: Path, survival) -> None:
+    """One number over 55 complexes, from two experiments designed for other things."""
+    changes = survival.paired_change(synthetic_metrics(n_complexes=20), "ipsae_d0res")
+    analysis = pd.DataFrame(
+        [
+            {
+                "pdb_id": f"{i + 1}ABC",
+                "partition": part,
+                "buffering_ratio": 1.0 + (0.03 * i if part == "interface" else 0.0),
+            }
+            for i in range(20)
+            for part in ("interface", "surface")
+        ]
+    )
+    path = tmp_path / "analysis_per_complex.csv"
+    analysis.to_csv(path, index=False)
+    report = survival.buffering_versus_survival(changes, path, seed=0)
+    assert report["status"].startswith("EXPLORATORY")
+
+
+def test_the_exploratory_link_refuses_too_few_complexes(tmp_path: Path, survival) -> None:
+    changes = survival.paired_change(synthetic_metrics(n_complexes=4), "ipsae_d0res")
+    analysis = pd.DataFrame(
+        [
+            {
+                "pdb_id": f"{i + 1}ABC",
+                "partition": part,
+                "buffering_ratio": 1.0 + (0.03 * i if part == "interface" else 0.0),
+            }
+            for i in range(4)
+            for part in ("interface", "surface")
+        ]
+    )
+    path = tmp_path / "analysis_per_complex.csv"
+    analysis.to_csv(path, index=False)
+    report = survival.buffering_versus_survival(changes, path, seed=0)
+    assert "not reported" in report["note"]

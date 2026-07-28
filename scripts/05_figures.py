@@ -38,6 +38,14 @@ say.
 line per complex plus a heavy median, showing the monotonic and asymmetric
 response.
 
+**Figure 6: does the interface survive.** The answer to question 2. Paired
+change in ipSAE against beta = 0 under complex-aware AlphaFold2-Multimer
+refolding, with bootstrap intervals over complexes, drawn twice: over every
+design that came back, and over the subset whose designed chain cleared the
+pLDDT floor. If the two series separate, the charge dial is breaking monomers
+rather than interfaces, and the figure has to show that rather than leave it to
+the caption.
+
 **Supplementary S1: interface definition agreement.** Jaccard index between the
 delta-SASA and contact definitions per complex. Establishes that the choice of
 definition does not drive the result.
@@ -263,6 +271,49 @@ def figure_definition_agreement(table: pd.DataFrame):
     return fig
 
 
+def figure_af2_interface_survival(table: pd.DataFrame, metric: str = "ipsae_d0res"):
+    """Interface confidence against beta, unfiltered and among designs that folded.
+
+    Both series are drawn because neither answers the question alone. If the two
+    separate, the charge dial is breaking monomers rather than interfaces, and
+    the figure should make that visible rather than leave it to the caption.
+    """
+    fig, ax = new_figure(width_in=4.4, height_in=3.4)
+    subset_styles = {"all_returned": ("#111111", "o", "all returned")}
+
+    rows = table[table["metric"] == metric]
+    for index, subset in enumerate(sorted(rows["subset"].unique())):
+        block = rows[rows["subset"] == subset].sort_values("beta")
+        colour, marker, label = subset_styles.get(
+            subset,
+            (PARTITION_COLOURS["interface"], "s", "designed chain folded"),
+        )
+        # Nudged apart so overlapping intervals stay readable.
+        offset = 0.06 * (index - 0.5)
+        ax.errorbar(
+            block["beta"] + offset,
+            block["mean_change_vs_beta0"],
+            yerr=[
+                block["mean_change_vs_beta0"] - block["ci_low"],
+                block["ci_high"] - block["mean_change_vs_beta0"],
+            ],
+            fmt=marker,
+            color=colour,
+            ms=4,
+            lw=1.2,
+            capsize=2.5,
+            label=f"{label} (n up to {int(block['n_complexes'].max())})",
+        )
+
+    ax.axhline(0.0, color="#111111", ls="--", lw=1.0)
+    ax.set_xlabel("charge bias beta")
+    ax.set_ylabel(f"paired change in {metric} against beta = 0")
+    ax.set_title("does the interface survive the dial", loc="left")
+    ax.legend(loc="lower center", fontsize=7)
+    fig.tight_layout()
+    return fig
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     resolve_config(args)
@@ -277,6 +328,7 @@ def main(argv: list[str] | None = None) -> int:
     uversky = read_if_present(results_dir / "uversky.csv", missing)
     complementarity = read_if_present(results_dir / "complementarity.csv", missing)
     interfaces = read_if_present(results_dir / "interfaces.csv", missing)
+    af2 = read_if_present(results_dir / "af2_interface_survival.csv", missing)
 
     inputs = [
         results_dir / name
@@ -287,6 +339,7 @@ def main(argv: list[str] | None = None) -> int:
             "uversky.csv",
             "complementarity.csv",
             "interfaces.csv",
+            "af2_interface_survival.csv",
         )
         if (results_dir / name).is_file()
     ]
@@ -310,6 +363,7 @@ def main(argv: list[str] | None = None) -> int:
             ("figure_2_partner_ablation", ablation, figure_partner_ablation, {}),
             ("figure_3_burial_control", burial, figure_burial_control, {}),
             ("figure_4_uversky", uversky, figure_uversky, {}),
+            ("figure_6_af2_interface_survival", af2, figure_af2_interface_survival, {}),
             ("supp_s1_definition_agreement", interfaces, figure_definition_agreement, {}),
         ]
         for name, table, builder, kwargs in plan:

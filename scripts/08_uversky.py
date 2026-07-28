@@ -38,7 +38,6 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import Final
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -49,50 +48,16 @@ from interface_charge.cli import add_common_arguments, banner, fail, resolve_con
 from interface_charge.config import RESULTS_DIR
 from interface_charge.contracts import SchemaError, load_designs
 from interface_charge.provenance import manifest_path_for, run_manifest
-from interface_charge.statistics import bootstrap_ci
+from interface_charge.statistics import (
+    bootstrap_ci,
+    spearman,
+    spearman_permutation_p,
+)
 from interface_charge.uversky import place_on_diagram
 
 #: Self-consistency RMSD below which a design is treated as having folded. Five
 #: angstroms is the threshold the upstream work reports against.
 FOLD_SUCCESS_RMSD_A = 5.0
-
-
-#: Permutations for the within-beta significance test.
-N_PERMUTATIONS: Final[int] = 10_000
-
-
-def spearman(a: np.ndarray, b: np.ndarray) -> float:
-    """Rank correlation, without pulling in scipy for one number."""
-    if a.size < 3:
-        return float("nan")
-    rank_a = pd.Series(a).rank().to_numpy()
-    rank_b = pd.Series(b).rank().to_numpy()
-    return float(np.corrcoef(rank_a, rank_b)[0, 1])
-
-
-def spearman_permutation_p(
-    a: np.ndarray, b: np.ndarray, *, seed: int, n_permutations: int = N_PERMUTATIONS
-) -> float:
-    """Two-sided permutation p-value for a rank correlation.
-
-    Shuffling one side breaks the pairing while keeping both marginal
-    distributions intact, which is the right null here: the designs at a given
-    beta really do have this spread of boundary distances and this spread of
-    RMSDs, and the question is only whether they are paired.
-    """
-    observed = spearman(a, b)
-    if not np.isfinite(observed):
-        return float("nan")
-    rng = np.random.default_rng(seed)
-    shuffled = b.copy()
-    at_least_as_extreme = 0
-    for _ in range(n_permutations):
-        rng.shuffle(shuffled)
-        if abs(spearman(a, shuffled)) >= abs(observed):
-            at_least_as_extreme += 1
-    # Add-one correction, so a p-value is never reported as exactly zero when
-    # the truth is only that it is below the resolution of the test.
-    return (at_least_as_extreme + 1) / (n_permutations + 1)
 
 
 def build_parser() -> argparse.ArgumentParser:

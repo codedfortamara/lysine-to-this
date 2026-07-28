@@ -34,6 +34,9 @@ __all__ = [
     "bootstrap_ci",
     "fraction_in_window",
     "paired_bootstrap_ci",
+    "spearman",
+    "spearman_bootstrap_ci",
+    "spearman_permutation_p",
     "window_membership_disagreement",
 ]
 
@@ -308,4 +311,122 @@ def best_of_n_bias_warning(sample_sizes: Sequence[int]) -> str | None:
         "The expected maximum grows with N, so the largest group is favoured "
         "independently of any real effect. Subsample to a common N, or report a "
         "statistic that does not depend on it."
+    )
+
+
+#: Permutations for a rank-correlation significance test. Ten thousand gives a
+#: resolution of about 1e-4, which is finer than any claim made from it.
+N_PERMUTATIONS = 10_000
+
+
+def spearman(a: Sequence[float], b: Sequence[float]) -> float:
+    """Rank correlation, without pulling in scipy for one number.
+
+    Returns NaN below three points rather than the ill-defined value numpy
+    would produce, so a caller cannot report a correlation from two.
+    """
+    first = np.asarray(a, dtype=np.float64)
+    second = np.asarray(b, dtype=np.float64)
+    if first.shape != second.shape:
+        raise ValueError(
+            f"paired samples must have equal length, got {first.shape} and {second.shape}"
+        )
+    if first.size < 3:
+        return float("nan")
+    return float(np.corrcoef(_ranks(first), _ranks(second))[0, 1])
+
+
+def _ranks(values: np.ndarray) -> np.ndarray:
+    """Average ranks, matching pandas' default and scipy's ``rankdata``.
+
+    Ties get the mean of the ranks they span. Ranking them arbitrarily instead
+    would make the correlation depend on input order, which for a table sorted
+    by one of the two variables is not a small effect.
+    """
+    order = np.argsort(values, kind="stable")
+    ranks = np.empty(values.size, dtype=np.float64)
+    ranks[order] = np.arange(1, values.size + 1, dtype=np.float64)
+    unique, inverse, counts = np.unique(values, return_inverse=True, return_counts=True)
+    if counts.max() > 1:
+        sums = np.zeros(unique.size, dtype=np.float64)
+        np.add.at(sums, inverse, ranks)
+        ranks = (sums / counts)[inverse]
+    return ranks
+
+
+def spearman_permutation_p(
+    a: Sequence[float],
+    b: Sequence[float],
+    *,
+    seed: int,
+    n_permutations: int = N_PERMUTATIONS,
+) -> float:
+    """Two-sided permutation p-value for a rank correlation.
+
+    Shuffling one side breaks the pairing while keeping both marginal
+    distributions intact, which is the right null: the two variables really do
+    have the spread they have, and the question is only whether they are paired.
+
+    Uses an add-one correction, so a p-value is never reported as exactly zero
+    when the truth is only that it lies below the resolution of the test.
+    """
+    first = np.asarray(a, dtype=np.float64)
+    second = np.asarray(b, dtype=np.float64)
+    observed = spearman(first, second)
+    if not np.isfinite(observed):
+        return float("nan")
+
+    rng = np.random.default_rng(seed)
+    shuffled = second.copy()
+    at_least_as_extreme = 0
+    for _ in range(n_permutations):
+        rng.shuffle(shuffled)
+        if abs(spearman(first, shuffled)) >= abs(observed):
+            at_least_as_extreme += 1
+    return (at_least_as_extreme + 1) / (n_permutations + 1)
+
+
+def spearman_bootstrap_ci(
+    a: Sequence[float],
+    b: Sequence[float],
+    confidence: float = 0.95,
+    n_resamples: int = 10_000,
+    seed: int = 0,
+) -> BootstrapInterval:
+    """Percentile interval for a rank correlation, resampling pairs together.
+
+    Separate from :func:`bootstrap_ci`, which resamples one sample of scalars.
+    Here the two values move as a unit: resampling them independently would
+    destroy the very association being estimated and return an interval centred
+    on zero regardless of the data.
+
+    Resamples that degenerate (every x tied, say) yield NaN and are dropped, and
+    the surviving count is reported on the interval so that a quietly thinned
+    bootstrap is visible.
+    """
+    first = np.asarray(a, dtype=np.float64)
+    second = np.asarray(b, dtype=np.float64)
+    if first.shape != second.shape:
+        raise ValueError(
+            f"paired samples must have equal length, got {first.shape} and {second.shape}"
+        )
+    if first.size < 3:
+        raise ValueError("a rank correlation needs at least three pairs")
+
+    rng = np.random.default_rng(seed)
+    draws = rng.integers(0, first.size, size=(n_resamples, first.size))
+    replicates = np.array([spearman(first[row], second[row]) for row in draws], dtype=np.float64)
+    replicates = replicates[np.isfinite(replicates)]
+    if replicates.size == 0:
+        raise ValueError("every bootstrap resample was degenerate; no interval to report")
+
+    tail = (1.0 - confidence) / 2.0
+    return BootstrapInterval(
+        estimate=spearman(first, second),
+        low=float(np.quantile(replicates, tail)),
+        high=float(np.quantile(replicates, 1.0 - tail)),
+        confidence=confidence,
+        n=int(first.size),
+        n_resamples=int(replicates.size),
+        seed=seed,
     )

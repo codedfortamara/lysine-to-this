@@ -50,6 +50,7 @@ PAIRED_METRICS = [
     "interface_rmsd_a",
     "complex_ptm",
     "mean_plddt",
+    "designed_chain_plddt",
 ]
 
 #: Columns emitted in a fixed order, so the CSV is diffable across runs.
@@ -70,6 +71,8 @@ COLUMN_ORDER = [
     "interface_pae",
     "interface_rmsd_a",
     "mean_plddt",
+    "designed_chain_plddt",
+    "partner_chain_plddt",
     "msa_paired",
     "n_interface_residues_compared",
     "receptor_superposition_rmsd_a",

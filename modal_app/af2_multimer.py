@@ -1745,11 +1745,36 @@ def collect_metrics(
 
     predicted_pdbs = sorted(out_dir.glob("*relaxed*.pdb")) or sorted(out_dir.glob("*.pdb"))
 
+    # Split per chain, because the complex mean cannot answer the question the
+    # analysis needs it for.
+    #
+    # The confound for the whole AF2 arm is that a highly charged design may
+    # simply not fold, and an interface score falls when the monomer collapses
+    # for reasons that have nothing to do with the interface. Separating the two
+    # needs the *designed* chain's confidence on its own. The complex mean is
+    # roughly half native partner, held identical at every beta, which damps
+    # exactly the signal being looked for: a design that has fallen apart can
+    # still show a respectable complex mean.
+    #
+    # plddt comes back as one value per residue in chain_order concatenation
+    # order, the same order the PAE matrix uses.
+    plddt = np.array(scores.get("plddt", []), dtype=float)
+    per_chain_plddt: dict[str, float] = {}
+    if plddt.size == sum(lengths):
+        start = 0
+        for chain_id, length in zip(chain_order, lengths, strict=True):
+            per_chain_plddt[chain_id] = float(plddt[start : start + length].mean())
+            start += length
+
     metrics: dict = {
         "complex_ptm": float(scores["ptm"]) if "ptm" in scores else None,
         "interface_ptm": float(scores["iptm"]) if "iptm" in scores else None,
         "interface_pae": interface_pae,
         "mean_plddt": float(np.mean(scores["plddt"])) if scores.get("plddt") else None,
+        "designed_chain_plddt": per_chain_plddt.get(job.designed_chain),
+        "partner_chain_plddt": next(
+            (v for c, v in per_chain_plddt.items() if c != job.designed_chain), None
+        ),
         "predicted_pdb": str(predicted_pdbs[0].name) if predicted_pdbs else None,
         "interface_rmsd_a": None,
         "interface_rmsd_note": "native structure not available in the container",
