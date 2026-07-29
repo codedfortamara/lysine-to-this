@@ -64,6 +64,7 @@ of about ten jobs, take the observed median, and put it in
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import os
 import sys
@@ -1838,6 +1839,8 @@ if MODAL_AVAILABLE:  # pragma: no cover - requires Modal
         test_set: str = "data/raw/test_set.csv",
         definitions: str = "results/interface_definitions.json",
         budget_usd: float = 0.0,
+        additional_usd: float = 0.0,
+        set_ledger_usd: float = -1.0,
         chunk_size: int = 4,
         min_residues: int = 0,
         max_residues: int = 0,
@@ -1859,6 +1862,40 @@ if MODAL_AVAILABLE:  # pragma: no cover - requires Modal
         relied on to stay awake and online for several hours, which on this
         project turned out to be every time.
         """
+        # The ledger is a pessimistic estimate, and can be corrected by someone
+        # holding the authoritative number.
+        #
+        # Failures are charged at the full timeout for every attempt, because a
+        # guard that under-charges them cannot stop a run that is only failing.
+        # That is the right trade for stopping a live run and the wrong one for a
+        # permanent record: 20 failures at the old two-hour timeout recorded
+        # $352.80 against a real bill several times smaller, and then refused
+        # every subsequent launch. Provider billing is authoritative; this is not.
+        if set_ledger_usd >= 0.0:
+            ledger = json.dumps(
+                {
+                    "total_usd": set_ledger_usd,
+                    "note": (
+                        "set explicitly from provider billing, replacing the "
+                        "pessimistic in-run estimate"
+                    ),
+                },
+                indent=2,
+            )
+            with results_volume.batch_upload(force=True) as upload:
+                upload.put_file(io.BytesIO(ledger.encode()), "/spend_ledger.json")
+            print(f"ledger set to ${set_ledger_usd:.2f} from provider billing")
+            if budget_usd <= 0.0 and additional_usd <= 0.0:
+                return
+
+        if additional_usd > 0.0:
+            recorded = recorded_spend()
+            budget_usd = recorded + additional_usd
+            print(
+                f"ledger records ${recorded:.2f}; authorising ${additional_usd:.2f} "
+                f"more, for a ceiling of ${budget_usd:.2f}"
+            )
+
         if budget_usd <= 0.0:
             print(
                 "Refusing to launch without an explicit --budget-usd.\n\n"
@@ -2360,6 +2397,17 @@ if MODAL_AVAILABLE:  # pragma: no cover - requires Modal
             if parent and parent not in {"natives", "msa_cache", "", "/"}:
                 keys.add(parent)
         return keys
+
+    def recorded_spend() -> float:
+        """Cumulative estimated spend on this volume, or zero if never written."""
+        try:
+            blob = b"".join(results_volume.read_file("spend_ledger.json"))
+        except VOLUME_MISSING:
+            return 0.0
+        try:
+            return float(json.loads(blob).get("total_usd", 0.0))
+        except (ValueError, TypeError):
+            return 0.0
 
     def cached_alignments() -> set[str]:
         """Alignment file names already sitting in the cache on the volume."""

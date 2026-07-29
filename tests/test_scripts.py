@@ -1149,3 +1149,40 @@ def test_a_single_stuck_job_cannot_cost_much() -> None:
     params = DEFAULT_CONFIG.af2
     worst_case = params.timeout_s / 3600.0 * params.rate_usd_per_hour()
     assert worst_case <= 0.50, f"a stuck job can still cost ${worst_case:.2f}"
+
+
+def test_the_ledger_can_be_corrected_from_provider_billing() -> None:
+    """The pessimistic charge is right for stopping a run and wrong as a record.
+
+    Failures are charged at the full timeout per attempt, because a guard that
+    under-charges them cannot stop a run that is only failing. But 20 failures at
+    the old two-hour timeout wrote $352.80 into the ledger against a real bill
+    several times smaller, and then refused every subsequent launch. The
+    provider's number is authoritative; this estimate is not, and must be
+    correctable by someone holding the real one.
+    """
+    af2 = _af2()
+    source = _function_source(af2, "launch")
+    assert "set_ledger_usd" in source
+    assert "provider billing" in source
+
+
+def test_an_incremental_budget_is_available() -> None:
+    """A cumulative ceiling is correct and unusable on its own.
+
+    Asking for twelve more dollars should not require knowing and then adding
+    the running total by hand.
+    """
+    af2 = _af2()
+    source = _function_source(af2, "launch")
+    assert "additional_usd" in source
+    assert "recorded + additional_usd" in source
+
+
+def test_correcting_the_ledger_alone_does_not_launch_anything() -> None:
+    """Setting a number is an accounting action, not an authorisation to spend."""
+    af2 = _af2()
+    source = _function_source(af2, "launch")
+    correction = source[source.index("set_ledger_usd >= 0.0") :]
+    assert "if budget_usd <= 0.0 and additional_usd <= 0.0:" in correction
+    assert "return" in correction
