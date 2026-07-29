@@ -421,3 +421,68 @@ def test_the_plddt_distribution_is_always_reported(tmp_path: Path) -> None:
     spread = summary["designed_chain_plddt_summary"]
     assert spread["min"] <= spread["median"] <= spread["max"]
     assert spread["floor"] == 70.0
+
+
+# ---------------------------------------------------------------------------
+# Backend mixing inside a paired comparison
+# ---------------------------------------------------------------------------
+
+
+def test_a_lineage_split_across_backends_is_flagged(survival) -> None:
+    """A paired difference assumes only the charge differs between the two rows.
+
+    AlphaFold on CPU and on GPU do not produce identical numbers, which is what
+    oneDNN warns about at every container start. 37 jobs in this grid ran on CPU
+    because of a cuDNN mismatch, so any grid mixing those with later GPU jobs
+    mixes backends inside the pairs that carry the claim.
+    """
+    table = synthetic_metrics(n_complexes=3)
+    table["jax_device_kind"] = "NVIDIA L4"
+    table.loc[table["beta"] == 0.0, "jax_device_kind"] = None  # references on CPU
+
+    report = survival.backend_consistency(table)
+
+    assert report["checkable"]
+    assert report["n_lineages_spanning_more_than_one_device"] == 3
+    assert "hardware" in report["note"]
+
+
+def test_a_single_backend_grid_is_not_flagged(survival) -> None:
+    table = synthetic_metrics(n_complexes=3)
+    table["jax_device_kind"] = "NVIDIA L4"
+    report = survival.backend_consistency(table)
+    assert report["n_lineages_spanning_more_than_one_device"] == 0
+    assert "same backend" in report["note"]
+
+
+def test_a_grid_with_no_device_column_says_it_cannot_be_checked(survival) -> None:
+    """Silence is not the same as a clean bill of health."""
+    report = survival.backend_consistency(synthetic_metrics())
+    assert report["checkable"] is False
+    assert "cannot be ruled out" in report["note"]
+
+
+def test_the_warning_reaches_the_operator(tmp_path: Path) -> None:
+    table = synthetic_metrics(n_complexes=3)
+    table["jax_device_kind"] = "NVIDIA L4"
+    table.loc[table["beta"] == 0.0, "jax_device_kind"] = None
+    metrics = tmp_path / "af2_metrics.csv"
+    table.to_csv(metrics, index=False)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT),
+            "--metrics",
+            str(metrics),
+            "--results-dir",
+            str(tmp_path / "results"),
+        ],
+        capture_output=True,
+        text=True,
+        cwd=REPO_ROOT,
+        timeout=300,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "different hardware" in result.stderr

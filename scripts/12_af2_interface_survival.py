@@ -279,6 +279,51 @@ def buffering_versus_survival(changes: pd.DataFrame, analysis_path: Path, seed: 
     }
 
 
+def backend_consistency(table: pd.DataFrame) -> dict:
+    """Did every design and its beta = 0 reference run on the same hardware?
+
+    A paired comparison assumes the only thing differing between the two rows is
+    the charge setting. AlphaFold on CPU and on GPU do not produce identical
+    numbers, which is what oneDNN warns about at every container start, so a
+    lineage whose reference ran on one backend and whose design ran on another
+    has part of its difference coming from the hardware rather than the biology.
+
+    This is not hypothetical here. 37 jobs ran on CPU because of a cuDNN version
+    mismatch and nothing in their output recorded it, so any grid mixing those
+    with later GPU jobs is mixing backends within the pairs that carry the
+    claim. Reported rather than corrected, because the correction is to rerun
+    the affected jobs on one backend, which costs a few dollars.
+    """
+    if "jax_device_kind" not in table.columns:
+        return {
+            "checkable": False,
+            "note": (
+                "no jax_device_kind column, so every row predates the recording "
+                "of it and ran on unknown hardware. Backend mixing within a "
+                "paired comparison cannot be ruled out."
+            ),
+        }
+
+    devices = table["jax_device_kind"].fillna("unrecorded")
+    mixed = []
+    for keys, block in table.assign(device=devices).groupby(list(PAIR_KEYS)):
+        if block["device"].nunique() > 1:
+            mixed.append("/".join(str(k) for k in keys))
+
+    return {
+        "checkable": True,
+        "devices_seen": sorted(devices.unique()),
+        "n_lineages_spanning_more_than_one_device": len(mixed),
+        "lineages_affected": sorted(mixed)[:20],
+        "note": (
+            "a lineage spanning two backends has part of its paired difference "
+            "coming from the hardware. Rerun those jobs on one backend."
+            if mixed
+            else "every design was compared against a reference from the same backend"
+        ),
+    }
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -484,6 +529,7 @@ def main(argv: list[str] | None = None) -> int:
 
         changes = paired_change(table, PRIMARY_METRIC)
         exploratory = buffering_versus_survival(changes, args.analysis, args.seed)
+        backends = backend_consistency(table)
 
         summary = {
             "primary_endpoint": PRIMARY_METRIC,
@@ -508,6 +554,7 @@ def main(argv: list[str] | None = None) -> int:
                 else None
             ),
             "exploratory_buffering_versus_survival": exploratory,
+            "backend_consistency": backends,
         }
         summary_path = results_dir / "af2_interface_survival_summary.json"
         summary_path.write_text(json.dumps(summary, indent=2, default=str) + "\n")
@@ -530,6 +577,20 @@ def main(argv: list[str] | None = None) -> int:
     print(f"\n{summary['fold_quality_reading']}", file=sys.stderr)
     if summary.get("fold_quality_control_note"):
         print(f"  reason: {summary['fold_quality_control_note']}", file=sys.stderr)
+    if summary["backend_consistency"].get("n_lineages_spanning_more_than_one_device"):
+        n = summary["backend_consistency"]["n_lineages_spanning_more_than_one_device"]
+        print(
+            f"\nWARNING: {n} design lineage(s) were compared against a beta = 0 "
+            "reference that ran on\ndifferent hardware. Part of those paired "
+            "differences is the backend, not the charge.\nRerun them on one "
+            "backend before reporting.",
+            file=sys.stderr,
+        )
+    if not summary["backend_consistency"].get("checkable", True):
+        print(
+            f"\nnote: {summary['backend_consistency']['note']}",
+            file=sys.stderr,
+        )
     if not summary["completeness"]["comparable_across_beta"]:
         print(
             f"\nWARNING: beta {summary['completeness']['betas_materially_depleted']} "

@@ -65,6 +65,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
@@ -104,6 +105,11 @@ TIMEOUT_S: int = PARAMS.timeout_s
 #: take it. Longer than a batch, so a driver busy folding is never displaced,
 #: and short enough that a crashed one does not block the grid for an evening.
 LEASE_STALE_AFTER_S: int = max(4 * PARAMS.timeout_s, 3600)
+
+#: Git commit of the code that produced a result, recorded in every metrics
+#: file. Read at import from the environment, because the container has no git
+#: repository to interrogate; the launcher stamps it in.
+CODE_COMMIT: str = os.environ.get("INTERFACE_CHARGE_COMMIT", "unknown")
 
 #: Container dependencies, and the constraints they have to satisfy.
 #:
@@ -1115,7 +1121,14 @@ if MODAL_AVAILABLE:  # pragma: no cover - requires Modal
         volumes={WEIGHTS_PATH: weights_volume, RESULTS_PATH: results_volume},
         timeout=TIMEOUT_S,
         max_containers=PARAMS.max_containers,
-        retries=modal.Retries(max_retries=1, backoff_coefficient=2.0),
+        # No retries. Modal restarts a preempted container regardless of this
+        # setting, so all it controls is whether a job that *errors* is paid for
+        # a second time. Errors here are systematic rather than transient: a
+        # complex too large, a malformed alignment, a missing weight. Paying
+        # twice to confirm one is exactly the behaviour that turned 2ZXE into
+        # six GPU-hours of nothing. A failed job is picked up by the next launch
+        # anyway, once whatever caused it has been looked at.
+        retries=0,
     )
     def predict(job_payload: dict, allow_msa_search: bool = False) -> dict:
         """Refold one complex and return interface-resolved metrics.
@@ -1287,7 +1300,21 @@ if MODAL_AVAILABLE:  # pragma: no cover - requires Modal
                 "random_seed": PARAMS.random_seed,
                 "hostname_gpu": os.environ.get("MODAL_GPU", PARAMS.gpu_type),
                 # What JAX actually initialised, not what was requested.
+                #
+                # This is a scientific field, not an operational one. AlphaFold
+                # on CPU and on GPU do not produce bit-identical output: the
+                # kernels differ, which is what oneDNN warns about at every
+                # container start. A paired within-complex comparison where the
+                # beta = 0 reference ran on one backend and the design on
+                # another has part of its difference coming from the hardware.
+                #
+                # 37 jobs in this grid ran on CPU because of a cuDNN mismatch,
+                # and nothing in their output said so. Recorded here, the
+                # question becomes answerable instead of invisible.
                 "jax_device_kind": gpu_kind,
+                "colabfold_version": COLABFOLD_VERSION,
+                "model_type": MODEL_TYPE,
+                "code_commit": CODE_COMMIT,
             }
         )
 
@@ -1801,8 +1828,8 @@ if MODAL_AVAILABLE:  # pragma: no cover - requires Modal
         designs: str = "data/raw/designs.csv",
         test_set: str = "data/raw/test_set.csv",
         definitions: str = "results/interface_definitions.json",
-        budget_usd: float = 250.0,
-        chunk_size: int = 20,
+        budget_usd: float = 0.0,
+        chunk_size: int = 4,
         min_residues: int = 0,
         max_residues: int = 0,
         only_betas: str = "",
@@ -1813,6 +1840,19 @@ if MODAL_AVAILABLE:  # pragma: no cover - requires Modal
         relied on to stay awake and online for several hours, which on this
         project turned out to be every time.
         """
+        if budget_usd <= 0.0:
+            print(
+                "Refusing to launch without an explicit --budget-usd.\n\n"
+                "The default used to be 250, which is a number nobody chose and "
+                "everybody inherited.\nA ceiling is only a decision if someone "
+                "makes it. Current settings put the outstanding\nwork at a few "
+                "dollars, so pass what you are willing to lose:\n\n"
+                "  modal run modal_app/af2_multimer.py::launch --budget-usd 45 ...\n\n"
+                "It is a cumulative total across launches on this volume, not a "
+                "per-launch allowance."
+            )
+            return
+
         if not weights_present():
             print(
                 f"The weights volume {PARAMS.weights_volume!r} is empty. Run "
@@ -1975,7 +2015,7 @@ if MODAL_AVAILABLE:  # pragma: no cover - requires Modal
         definitions: str = "results/interface_definitions.json",
         budget_usd: float = 122.0,
         wave: int = 0,
-        chunk_size: int = 20,
+        chunk_size: int = 4,
         n_canary: int = 5,
         yes: bool = False,
         pilot: int = 0,
