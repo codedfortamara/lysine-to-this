@@ -281,3 +281,24 @@ def test_the_launcher_checks_the_cache_before_spawning() -> None:
     source = function_source("launch")
     assert "cached_alignments()" in source
     assert source.index("cached_alignments()") < source.index("drive.spawn(")
+
+
+def test_the_processor_that_did_the_work_is_recorded() -> None:
+    """Without it, a CPU-contaminated timing is indistinguishable from a slow one.
+
+    Thirty-seven jobs ran on CPU at A100 prices before anyone noticed, and the
+    only reason it was caught was one line in a container log. Nothing in the
+    output said which processor produced a timing, so every cost model built on
+    those timings inherited the error silently.
+    """
+    assert '"jax_device_kind": gpu_kind' in function_source("predict")
+    assert "gpu_kind = require_gpu_backend()" in function_source("predict")
+    assert "return str(device.device_kind)" in function_source("require_gpu_backend")
+
+
+def test_the_recost_excludes_jobs_of_unknown_provenance() -> None:
+    """Pooling CPU and GPU timings reproduces the original error exactly."""
+    source = function_source("timings")
+    assert 'r.get("jax_device_kind")' in source
+    assert "EXCLUDED from the re-costing" in source
+    assert "must not be used to plan a run" in source

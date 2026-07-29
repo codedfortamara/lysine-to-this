@@ -880,8 +880,14 @@ def msa_plan(job: Job) -> dict[str, str]:
     return modes
 
 
-def require_gpu_backend() -> None:
+def require_gpu_backend() -> str:
     """Refuse to fold on CPU inside a container that is billed as a GPU.
+
+    Returns the GPU's device kind, which the caller records in the metrics. That
+    matters as much as the refusal: without it, nothing in the output says which
+    processor produced a timing, so a run contaminated by a CPU fallback is
+    indistinguishable from a slow one, and every cost model built on it inherits
+    the error silently. Recording it makes the question answerable afterwards.
 
     JAX does not fail when its CUDA backend cannot initialise. It logs one line
     and silently uses CPU. AlphaFold then runs correctly and tens of times more
@@ -898,15 +904,17 @@ def require_gpu_backend() -> None:
     import jax
 
     devices = jax.devices()
-    if not any(device.platform == "gpu" for device in devices):
-        raise RuntimeError(
-            "JAX has no GPU device; it would run AlphaFold on CPU at GPU prices.\n"
-            f"Devices visible: {devices}\n"
-            "Look in the container log for 'CUDA backend failed to initialize'. "
-            "The usual cause is a cuDNN series mismatch: jaxlib "
-            "0.4.23+cuda12.cudnn89 needs the 8.9 series, and its own dependency "
-            "declaration does not pin the upper bound, so pip installs 9.x."
-        )
+    for device in devices:
+        if device.platform == "gpu":
+            return str(device.device_kind)
+    raise RuntimeError(
+        "JAX has no GPU device; it would run AlphaFold on CPU at GPU prices.\n"
+        f"Devices visible: {devices}\n"
+        "Look in the container log for 'CUDA backend failed to initialize'. "
+        "The usual cause is a cuDNN series mismatch: jaxlib "
+        "0.4.23+cuda12.cudnn89 needs the 8.9 series, and its own dependency "
+        "declaration does not pin the upper bound, so pip installs 9.x."
+    )
 
 
 def searches_required(jobs: list[Job]) -> list[tuple[str, str, str]]:
@@ -1020,7 +1028,7 @@ if MODAL_AVAILABLE:  # pragma: no cover - requires Modal
 
         from colabfold.batch import run as colabfold_run
 
-        require_gpu_backend()
+        gpu_kind = require_gpu_backend()
 
         job = Job(**job_payload)
         out_dir = Path(RESULTS_PATH) / job.key
@@ -1114,6 +1122,8 @@ if MODAL_AVAILABLE:  # pragma: no cover - requires Modal
                 "num_models": PARAMS.num_models,
                 "random_seed": PARAMS.random_seed,
                 "hostname_gpu": os.environ.get("MODAL_GPU", PARAMS.gpu_type),
+                # What JAX actually initialised, not what was requested.
+                "jax_device_kind": gpu_kind,
             }
         )
 
@@ -1606,6 +1616,13 @@ if MODAL_AVAILABLE:  # pragma: no cover - requires Modal
                 f"min {values[0] / 60:.1f}, max {values[-1] / 60:.1f}"
             )
 
+        # Jobs that predate the cuDNN fix ran on CPU while being billed as an
+        # A100, and their timings are ten times too slow. Pooling them with GPU
+        # jobs reproduces exactly the error that made every earlier estimate
+        # wrong, so they are separated rather than averaged in.
+        on_gpu = [r for r in records if r.get("jax_device_kind")]
+        unknown = [r for r in records if not r.get("jax_device_kind")]
+
         wall = [float(r["wall_clock_s"]) for r in records if "wall_clock_s" in r]
         # Older records predate the split and carry no msa_seconds. They are
         # reported as unattributed rather than folded into the fold time, which
@@ -1624,6 +1641,23 @@ if MODAL_AVAILABLE:  # pragma: no cover - requires Modal
                 "so their wall clock still includes the MMseqs2 wait)"
             )
             basis = sorted(wall)
+
+        if unknown:
+            print(
+                f"\n{len(unknown)} job(s) carry no jax_device_kind. Those predate the "
+                "cuDNN fix and\nran on CPU at GPU prices, so their timings are roughly "
+                "ten times too slow.\nThey are EXCLUDED from the re-costing below."
+            )
+        if on_gpu:
+            confirmed = sorted(float(r["fold_seconds"]) for r in on_gpu if "fold_seconds" in r)
+            if confirmed:
+                print(f"\nfolding, GPU-confirmed jobs only: {stat(confirmed)}")
+                basis = confirmed
+        else:
+            print(
+                "\nNo job has yet been confirmed to have run on a GPU. The figure "
+                "below is\ntherefore a CPU timing and must not be used to plan a run."
+            )
 
         minutes = basis[len(basis) // 2] / 60.0
         print(f"\nre-costing the grid at the observed median of {minutes:.1f} min per job")
