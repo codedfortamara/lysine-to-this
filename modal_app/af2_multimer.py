@@ -1977,21 +1977,30 @@ if MODAL_AVAILABLE:  # pragma: no cover - requires Modal
         ``metrics.json`` marks a job as done, which is also why it is the last
         thing ``predict`` writes.
         """
-        keys: set[str] = set()
+        # One recursive listing, not one call per directory.
+        #
+        # The first version issued a separate request for every job folder to
+        # ask whether its metrics.json existed. At forty jobs that is forty
+        # round-trips, and it grows with the grid; one of them died with
+        #
+        #     StreamTerminatedError: Protocol error
+        #
+        # and took the whole command down. A single stream is both faster and
+        # has one thing to go wrong instead of hundreds.
         try:
-            entries = list(results_volume.listdir("/", recursive=False))
+            entries = list(results_volume.listdir("/", recursive=True))
         except VOLUME_MISSING:
             return set()
 
+        keys: set[str] = set()
         for entry in entries:
-            name = Path(entry.path).name
-            if name in {"natives", "msa_cache"}:
+            path = Path(entry.path)
+            if path.name != "metrics.json":
                 continue
-            try:
-                next(iter(results_volume.listdir(f"/{name}/metrics.json")))
-            except VOLUME_MISSING:
-                continue
-            keys.add(name)
+            # /<job key>/metrics.json, so the parent is the key.
+            parent = path.parent.name
+            if parent and parent not in {"natives", "msa_cache", "", "/"}:
+                keys.add(parent)
         return keys
 
     def cached_alignments() -> set[str]:
