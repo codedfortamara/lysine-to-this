@@ -242,11 +242,21 @@ from colabfold.batch import msa_to_str
 from colabfold.batch import run as colabfold_run
 from colabfold.colabfold import run_mmseqs2
 
-# AlphaFold2-Multimer memory grows roughly with the square of total length. This
+# AlphaFold2-Multimer memory grows roughly with the square of total length. The
 # cap is deliberately conservative: a job that dies takes the session with it,
 # and a skipped job recorded honestly is worth more than a crashed notebook.
+#
+# The tiers are set against this cohort rather than in the abstract. The largest
+# complex in the 55 is 1257 total residues (2ZXE and 3A3Y), and only three
+# exceed 1000, so a 40 GB A100 clears the whole set and a 24 GB L4 clears 52 of
+# 55. A free T4 leaves five behind.
 GPU_GB = torch.cuda.get_device_properties(0).total_memory / 1e9
-MAX_TOTAL_RESIDUES = 1000 if GPU_GB > 20 else 700
+if GPU_GB > 30:
+    MAX_TOTAL_RESIDUES = 1400
+elif GPU_GB > 20:
+    MAX_TOTAL_RESIDUES = 1000
+else:
+    MAX_TOTAL_RESIDUES = 700
 print(f"GPU has {GPU_GB:.0f} GB, capping jobs at {MAX_TOTAL_RESIDUES} total residues")
 
 
