@@ -1,0 +1,93 @@
+{
+  "created_utc": "2026-07-27T07:40:35+00:00",
+  "environment": {
+    "machine": "x86_64",
+    "packages": {
+      "biopython": "1.87",
+      "freesasa": "2.2.1",
+      "matplotlib": "3.11.1",
+      "modal": null,
+      "numpy": "2.4.6",
+      "pandas": "3.0.5",
+      "scipy": null
+    },
+    "platform": "Linux-6.18.5-x86_64-with-glibc2.39",
+    "python": "3.11.15",
+    "python_implementation": "CPython"
+  },
+  "git": {
+    "branch": "claude/lysine-to-this-plan-kfmjfn",
+    "commit": "d4538524edb01b756ee5eae139c575edd4cd3e67",
+    "dirty": false,
+    "dirty_paths": []
+  },
+  "inputs": [
+    {
+      "path": "data/raw/designs.csv",
+      "sha256": "c1edb4fc961922780916d89fc716cd6ae5e135e0c9c8812407f8d1fa00044af6",
+      "size_bytes": 64114
+    },
+    {
+      "path": "data/raw/test_set.csv",
+      "sha256": "1576f610407696ebffb6dfa1138ff71035456db71105596808d3bd1cd6dd268f",
+      "size_bytes": 1633
+    },
+    {
+      "path": "results/interface_definitions.json",
+      "sha256": "2f2ec0cbab656277a058eb77662f2b15f501fb9b6b8667a3aec4c7baf631598d",
+      "size_bytes": 994063
+    }
+  ],
+  "manifest_hash": "905e1bd0cdc5e9f1d3d7498a442e4f0cdd0e43ef2328e3c291f784f6f349401e",
+  "notes": {
+    "best_matching_definition": "simple_KR_minus_DE",
+    "best_mean_absolute_error": 0.0,
+    "n_designs": 275,
+    "reconciliation_conclusive": true
+  },
+  "outputs": [
+    {
+      "path": "/home/user/lysine-to-this/results/charge_partitions.csv",
+      "sha256": "30f948205139311dcc93293b2b1b6639f5fa3d3501af324c72350f7bc968ff8b",
+      "size_bytes": 54065
+    },
+    {
+      "path": "/home/user/lysine-to-this/results/charge_reconciliation.csv",
+      "sha256": "9d2e6a004253614cd0b4d35e1176de92e9627c88352ac20dcaf0e9598778a075",
+      "size_bytes": 925
+    }
+  ],
+  "parameters": {
+    "charge": {
+      "include_cys_tyr": true,
+      "include_termini": true,
+      "ph": 7.4,
+      "pka_set": "emboss",
+      "reported_charge_tolerance": 0.51
+    },
+    "interface": {
+      "contact_cutoff_a": 5.0,
+      "core_relative_sasa_max": 0.25,
+      "delta_sasa_threshold_a2": 1.0,
+      "n_sphere_points": 100,
+      "probe_radius_a": 1.4,
+      "sasa_backend": "shrake_rupley"
+    },
+    "reconciliation_candidates": [
+      "simple_KR_minus_DE",
+      "ph7.4_emboss",
+      "ph7.4_bjellqvist",
+      "ph7.4_emboss_no_termini",
+      "ph7.4_emboss_no_cys_tyr",
+      "ph7.0_emboss",
+      "ph7.0_bjellqvist"
+    ]
+  },
+  "schema_version": 1,
+  "script": "02_partition_charge.py",
+  "script_sha256": "6e3b72ff7b22298a21b2c9236b520ea10aea2d44cd061ab247aa3245004eecf7",
+  "seeds": {
+    "random_seed": 0
+  },
+  "status": "completed"
+}

@@ -1,0 +1,70 @@
+{
+  "created_utc": "2026-07-27T07:40:37+00:00",
+  "environment": {
+    "machine": "x86_64",
+    "packages": {
+      "biopython": "1.87",
+      "freesasa": "2.2.1",
+      "matplotlib": "3.11.1",
+      "modal": null,
+      "numpy": "2.4.6",
+      "pandas": "3.0.5",
+      "scipy": null
+    },
+    "platform": "Linux-6.18.5-x86_64-with-glibc2.39",
+    "python": "3.11.15",
+    "python_implementation": "CPython"
+  },
+  "git": {
+    "branch": "claude/lysine-to-this-plan-kfmjfn",
+    "commit": "d4538524edb01b756ee5eae139c575edd4cd3e67",
+    "dirty": false,
+    "dirty_paths": []
+  },
+  "inputs": [
+    {
+      "path": "data/raw/designs.csv",
+      "sha256": "c1edb4fc961922780916d89fc716cd6ae5e135e0c9c8812407f8d1fa00044af6",
+      "size_bytes": 64114
+    },
+    {
+      "path": "/tmp/claude-0/-home-user-lysine-to-this/0c2f9f24-7d0e-5196-89c1-5c2bfc69f8fd/scratchpad/zetadial/data/fold_results.csv",
+      "sha256": "f8578bf8f363387d2d68cbba32e653ff56bf913df4887b146bcad280ccefbd0e",
+      "size_bytes": 11565
+    }
+  ],
+  "manifest_hash": "33e0185739b875f09dac85649896798b6e9a9a935a1725468ad911b9509f2f48",
+  "notes": {
+    "n_designs": 275
+  },
+  "outputs": [
+    {
+      "path": "/home/user/lysine-to-this/results/uversky_with_folding.csv",
+      "sha256": "6ff086cc6edaaac01d3e6e4d7ae1bf81539c13e43df1c85c51a1d97341235a05",
+      "size_bytes": 30729
+    },
+    {
+      "path": "/home/user/lysine-to-this/results/uversky.csv",
+      "sha256": "6f6a38f87a18917e401cfe044a536c73b86018b02a48c77e06ed926eb062f4b2",
+      "size_bytes": 27742
+    },
+    {
+      "path": "/home/user/lysine-to-this/results/uversky_summary.json",
+      "sha256": "dfd0a9bf65c85ed5bcf5b51dc3114b9004498333e295c5b7c30c0177d4962c3d",
+      "size_bytes": 3364
+    }
+  ],
+  "parameters": {
+    "boundary": "Uversky, Gillespie and Fink (2000): charge = 2.785 * hydropathy - 1.151",
+    "charge_definition": "simple",
+    "fold_success_rmsd_a": 5.0,
+    "hydropathy_scale": "Kyte and Doolittle (1982), normalised onto [0, 1]"
+  },
+  "schema_version": 1,
+  "script": "08_uversky.py",
+  "script_sha256": "e3f2bc1e125ee3d0bfd6b88b52410c885b40d580f00d12e7815d5d9f51610340",
+  "seeds": {
+    "seed": 0
+  },
+  "status": "completed"
+}

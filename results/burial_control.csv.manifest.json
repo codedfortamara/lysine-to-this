@@ -1,0 +1,71 @@
+{
+  "created_utc": "2026-07-27T02:36:39+00:00",
+  "environment": {
+    "machine": "x86_64",
+    "packages": {
+      "biopython": "1.87",
+      "freesasa": "2.2.1",
+      "matplotlib": "3.11.1",
+      "modal": null,
+      "numpy": "2.4.6",
+      "pandas": "3.0.5",
+      "scipy": null
+    },
+    "platform": "Linux-6.18.5-x86_64-with-glibc2.39",
+    "python": "3.11.15",
+    "python_implementation": "CPython"
+  },
+  "git": {
+    "branch": "claude/lysine-to-this-plan-kfmjfn",
+    "commit": "3b0b7e05a13891bbfe7a8b8e0296a172aab0f36c",
+    "dirty": false,
+    "dirty_paths": []
+  },
+  "inputs": [
+    {
+      "path": "data/raw/designs.csv",
+      "sha256": "c1edb4fc961922780916d89fc716cd6ae5e135e0c9c8812407f8d1fa00044af6",
+      "size_bytes": 64114
+    },
+    {
+      "path": "results/interface_definitions.json",
+      "sha256": "2f2ec0cbab656277a058eb77662f2b15f501fb9b6b8667a3aec4c7baf631598d",
+      "size_bytes": 994063
+    }
+  ],
+  "manifest_hash": "a3495eed7d37b84058dc079b8eb90c1015c21b0cc3d80940cddf9d0a27f0c9d5",
+  "notes": {
+    "n_chains": 51,
+    "n_skipped": 4
+  },
+  "outputs": [
+    {
+      "path": "/home/user/lysine-to-this/results/burial_control.csv",
+      "sha256": "a51f905e85653c00dd33a6e39f867021de43aa121047fe80d99fa93a8205a398",
+      "size_bytes": 8923
+    },
+    {
+      "path": "/home/user/lysine-to-this/results/burial_control_per_residue.csv",
+      "sha256": "b49a4e95c9ab4562052aaed7a9424ba51a2679e82a9747caf5eb701ec1cbddaa",
+      "size_bytes": 495050
+    },
+    {
+      "path": "/home/user/lysine-to-this/results/burial_control_summary.json",
+      "sha256": "7235caaa5047835974f6b47d81d6e497c3f6cc84e0281ccf36bd241198cc879a",
+      "size_bytes": 734
+    }
+  ],
+  "parameters": {
+    "charge_definition": "simple",
+    "matching": "nearest available relative SASA, without replacement",
+    "min_betas": 3,
+    "permutations": 10000
+  },
+  "schema_version": 1,
+  "script": "07_burial_control.py",
+  "script_sha256": "4ccbb8516f2dc35d03a52d6f609a9a0f37973a1385cd5468fa198394434be739",
+  "seeds": {
+    "seed": 0
+  },
+  "status": "completed"
+}

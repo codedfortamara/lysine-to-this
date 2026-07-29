@@ -1,0 +1,22 @@
+{
+  "interpretation": "The interface effect survives matching on burial",
+  "mean_rsasa_interface": 0.47533574539793444,
+  "mean_rsasa_match_error": 0.0115574449869461,
+  "mean_rsasa_surface": 0.47090764111098776,
+  "n_chains": 51,
+  "n_chains_p_below_0.05": 50,
+  "observed_minus_null": {
+    "ci_high": -0.1714397542680569,
+    "ci_low": -0.29531270855265157,
+    "excludes_zero": true,
+    "mean": -0.232806800349504
+  },
+  "per_residue": {
+    "correlation_slope_with_rsasa": 0.1475150579827557,
+    "n_exposed_residues": 5462,
+    "regression_intercept": 0.004558455350464572,
+    "regression_interface_coefficient": -0.0004540275703397654,
+    "regression_rsasa_coefficient": 0.004379421446273055
+  },
+  "permutations": 10000
+}

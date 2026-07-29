@@ -1,0 +1,84 @@
+{
+  "created_utc": "2026-07-27T07:42:10+00:00",
+  "environment": {
+    "machine": "x86_64",
+    "packages": {
+      "biopython": "1.87",
+      "freesasa": "2.2.1",
+      "matplotlib": "3.11.1",
+      "modal": null,
+      "numpy": "2.4.6",
+      "pandas": "3.0.5",
+      "scipy": null
+    },
+    "platform": "Linux-6.18.5-x86_64-with-glibc2.39",
+    "python": "3.11.15",
+    "python_implementation": "CPython"
+  },
+  "git": {
+    "branch": "claude/lysine-to-this-plan-kfmjfn",
+    "commit": "d4538524edb01b756ee5eae139c575edd4cd3e67",
+    "dirty": false,
+    "dirty_paths": []
+  },
+  "inputs": [
+    {
+      "path": "data/raw/designs.csv",
+      "sha256": "c1edb4fc961922780916d89fc716cd6ae5e135e0c9c8812407f8d1fa00044af6",
+      "size_bytes": 64114
+    },
+    {
+      "path": "data/raw/test_set.csv",
+      "sha256": "1576f610407696ebffb6dfa1138ff71035456db71105596808d3bd1cd6dd268f",
+      "size_bytes": 1633
+    }
+  ],
+  "manifest_hash": "1450b9dd4b9269b5abe6c1fb4a3a4e4ea7c561470bfddc33b578ffc9a1be3876",
+  "notes": {
+    "n_complexes": 55,
+    "n_skipped": 0
+  },
+  "outputs": [
+    {
+      "path": "results/salt_bridges_betam1_5.csv",
+      "sha256": "8291b1aed1839227487842bb6427bf19facbaa70a437fbe3e96eefecdc5da8d0",
+      "size_bytes": 12441
+    },
+    {
+      "path": "results/salt_bridges_betam1_5_summary.json",
+      "sha256": "838ce803139d69aa772fbcda61de3dbfdb2e3abfe8e8f739f36f20553d733c3e",
+      "size_bytes": 1507
+    }
+  ],
+  "parameters": {
+    "beta_compared": -1.5,
+    "definition": "cbeta_proxy (the only one computable on a threaded design)",
+    "salt_bridge": {
+      "cutoff_a": 4.0,
+      "include_histidine": false,
+      "proxy_cbeta_cutoff_a": 6.0
+    },
+    "structure": {
+      "accepted_altlocs": [
+        "",
+        " ",
+        "A"
+      ],
+      "download_attempts": 4,
+      "download_backoff_s": 2.0,
+      "download_timeout_s": 60.0,
+      "ignore_hydrogens": true,
+      "keep_heteroatoms": false,
+      "model_index": 0,
+      "native_format": "pdb",
+      "rcsb_url_template": "https://files.rcsb.org/download/{pdb_id}.cif"
+    }
+  },
+  "schema_version": 1,
+  "script": "06_salt_bridges.py",
+  "script_sha256": "83e411b6a9459fc634c55b4f755152b5b68665ee708d0a6e076c1ef4e655bf49",
+  "seeds": {
+    "bootstrap_seed": 0
+  },
+  "status": "completed"
+}

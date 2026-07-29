@@ -1,0 +1,115 @@
+{
+  "by_beta": [
+    {
+      "beta": -3.0,
+      "fraction_predicted_disordered": 1.0,
+      "mean_distance": 1.1065,
+      "mean_hydropathy": 0.277,
+      "mean_net_charge": 0.7268,
+      "n": 55
+    },
+    {
+      "beta": -1.5,
+      "fraction_predicted_disordered": 1.0,
+      "mean_distance": 0.4875,
+      "mean_hydropathy": 0.4024,
+      "mean_net_charge": 0.4572,
+      "n": 55
+    },
+    {
+      "beta": 0.0,
+      "fraction_predicted_disordered": 0.1455,
+      "mean_distance": -0.1128,
+      "mean_hydropathy": 0.4696,
+      "mean_net_charge": 0.0442,
+      "n": 55
+    },
+    {
+      "beta": 1.5,
+      "fraction_predicted_disordered": 1.0,
+      "mean_distance": 0.4974,
+      "mean_hydropathy": 0.379,
+      "mean_net_charge": 0.4018,
+      "n": 55
+    },
+    {
+      "beta": 3.0,
+      "fraction_predicted_disordered": 1.0,
+      "mean_distance": 1.0484,
+      "mean_hydropathy": 0.2686,
+      "mean_net_charge": 0.6455,
+      "n": 55
+    }
+  ],
+  "fold_test": {
+    "confound_note": "spearman_distance_vs_rmsd is pooled across beta and is inflated by the beta effect itself. mean_within_beta_spearman is the part not attributable to the dial setting.",
+    "fold_rate_inside": 0.7659574468085106,
+    "fold_rate_inside_ci": [
+      0.6382978723404256,
+      0.8723404255319149
+    ],
+    "fold_rate_outside": 0.4298245614035088,
+    "fold_rate_outside_ci": [
+      0.36403508771929827,
+      0.491337719298244
+    ],
+    "mean_within_beta_spearman": 0.29260172810938734,
+    "median_rmsd_inside": 1.68,
+    "median_rmsd_outside": 7.449999999999999,
+    "n_inside_boundary": 47,
+    "n_joined": 275,
+    "n_outside_boundary": 228,
+    "spearman_distance_vs_rmsd": 0.6277728667053579,
+    "within_beta": [
+      {
+        "beta": -3.0,
+        "fold_rate": 0.09090909090909091,
+        "median_rmsd": 28.1,
+        "n": 55,
+        "permutation_p": 0.0029997000299970002,
+        "spearman_distance_vs_rmsd": 0.4018037518037519
+      },
+      {
+        "beta": -1.5,
+        "fold_rate": 0.6363636363636364,
+        "median_rmsd": 2.33,
+        "n": 55,
+        "permutation_p": 0.08769123087691232,
+        "spearman_distance_vs_rmsd": 0.2363318242055495
+      },
+      {
+        "beta": 0.0,
+        "fold_rate": 0.7818181818181819,
+        "median_rmsd": 1.68,
+        "n": 55,
+        "permutation_p": 0.5050494950504949,
+        "spearman_distance_vs_rmsd": 0.09059095196394457
+      },
+      {
+        "beta": 1.5,
+        "fold_rate": 0.7454545454545455,
+        "median_rmsd": 2.21,
+        "n": 55,
+        "permutation_p": 0.028897110288971104,
+        "spearman_distance_vs_rmsd": 0.3001551284467062
+      },
+      {
+        "beta": 3.0,
+        "fold_rate": 0.18181818181818182,
+        "median_rmsd": 15.85,
+        "n": 55,
+        "permutation_p": 0.0017998200179982,
+        "spearman_distance_vs_rmsd": 0.43412698412698425
+      }
+    ]
+  },
+  "n_designs": 275,
+  "overall_fraction_predicted_disordered": 0.8290909090909091,
+  "sign_asymmetry_the_diagram_cannot_see": {
+    "mean_distance_negative": 0.5322504197165557,
+    "mean_distance_positive": 0.7226564538609596,
+    "n_negative": 155,
+    "n_positive": 117,
+    "note": "The diagram uses absolute net charge, so equally positive and negative designs coincide on it. Any difference in outcome between the two directions is therefore outside what this boundary explains."
+  }
+}

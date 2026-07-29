@@ -1,0 +1,67 @@
+{
+  "created_utc": "2026-07-27T07:40:37+00:00",
+  "environment": {
+    "machine": "x86_64",
+    "packages": {
+      "biopython": "1.87",
+      "freesasa": "2.2.1",
+      "matplotlib": "3.11.1",
+      "modal": null,
+      "numpy": "2.4.6",
+      "pandas": "3.0.5",
+      "scipy": null
+    },
+    "platform": "Linux-6.18.5-x86_64-with-glibc2.39",
+    "python": "3.11.15",
+    "python_implementation": "CPython"
+  },
+  "git": {
+    "branch": "claude/lysine-to-this-plan-kfmjfn",
+    "commit": "d4538524edb01b756ee5eae139c575edd4cd3e67",
+    "dirty": false,
+    "dirty_paths": []
+  },
+  "inputs": [
+    {
+      "path": "results/ablation_paired/analysis_per_complex.csv",
+      "sha256": "662b600ddbf0e54b13ed4d6195d40af3a04dcb6db21c9168eac2f01b23fc3944",
+      "size_bytes": 17019
+    },
+    {
+      "path": "results/ablation_isolated/analysis_per_complex.csv",
+      "sha256": "600068d5e0d2b25831719a7f9c49972115e31360d4141e6aeceb901095f2f6b1",
+      "size_bytes": 16949
+    }
+  ],
+  "manifest_hash": "51fc6a1f9e5c7bf6fb37ee601298077eb31b495cf9ae13bcdeb2d4c1af67880f",
+  "notes": {
+    "n_complexes": 44
+  },
+  "outputs": [
+    {
+      "path": "/home/user/lysine-to-this/results/partner_ablation.csv",
+      "sha256": "19a8c79fbdfaedc12c821c04e0ce12ae86217b950e444c3ae474d4e2a3aa7ea2",
+      "size_bytes": 2294
+    },
+    {
+      "path": "/home/user/lysine-to-this/results/partner_ablation_summary.json",
+      "sha256": "5704254579085aef9bfb97ffad7e84eb7c849c25adbb9f6d4ab1ba9af42d1782",
+      "size_bytes": 684
+    }
+  ],
+  "parameters": {
+    "arms": {
+      "isolated": "partner chain removed from the structure before featurisation",
+      "paired": "ProteinMPNN sees the whole complex"
+    },
+    "interface_definition_source": "the native complex in both arms, so the two are compared over identical positions",
+    "statistic": "interface buffering ratio minus surface buffering ratio, differenced between arms and paired by complex"
+  },
+  "schema_version": 1,
+  "script": "09_partner_ablation.py",
+  "script_sha256": "013f73c69ee7c3f9d9a9a5cf4d34a07169e18e010188b503f1b1dc01569bc5c3",
+  "seeds": {
+    "seed": 0
+  },
+  "status": "completed"
+}

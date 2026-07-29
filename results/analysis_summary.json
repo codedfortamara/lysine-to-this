@@ -1,0 +1,73 @@
+{
+  "af2": {
+    "note": "AlphaFold2-Multimer metrics absent. Question 1 is complete without them; question 2 needs modal_app/collect.py to have run."
+  },
+  "complementarity": {
+    "by_beta": {
+      "ec_sum_product_ph7.4_emboss": {
+        "-3.0": -3.6463,
+        "-1.5": -3.9994,
+        "0.0": -1.009,
+        "1.5": 0.1118,
+        "3.0": 4.9926
+      },
+      "ec_sum_product_simple": {
+        "-3.0": -6.0,
+        "-1.5": -3.0,
+        "0.0": -1.0,
+        "1.5": 1.0,
+        "3.0": 4.0
+      }
+    },
+    "columns": [
+      "ec_sum_product_simple",
+      "ec_sum_product_ph7.4_emboss"
+    ],
+    "n_designs": 275
+  },
+  "definitions": {
+    "simple": {
+      "against_residue_share": {
+        "core": {
+          "ci_high": -0.1615711595697068,
+          "ci_low": -0.1969829051266998,
+          "excludes_zero": true,
+          "interpretation": "core absorbs less charge than a structure-blind placement would give it",
+          "mean_slope_minus_share": -0.17953864939354441,
+          "n_below_share": 53,
+          "n_complexes": 55
+        },
+        "interface": {
+          "ci_high": 0.021847936242314278,
+          "ci_low": 0.004437647791398344,
+          "excludes_zero": true,
+          "interpretation": "interface absorbs more charge than a structure-blind placement would give it",
+          "mean_slope_minus_share": 0.013601555594277531,
+          "n_below_share": 10,
+          "n_complexes": 55
+        },
+        "surface": {
+          "ci_high": 0.17853338079561837,
+          "ci_low": 0.15341229665418143,
+          "excludes_zero": true,
+          "interpretation": "surface absorbs more charge than a structure-blind placement would give it",
+          "mean_slope_minus_share": 0.165937093799267,
+          "n_below_share": 0,
+          "n_complexes": 55
+        }
+      },
+      "interface_versus_surface": {
+        "ci_high": -0.20601574944372575,
+        "ci_low": -0.30237093151076044,
+        "excludes_zero": true,
+        "interpretation": "interface absorbs LESS than surface relative to its residue share, and the interval excludes zero",
+        "mean_interface_ratio": 1.1895182243713154,
+        "mean_paired_difference": -0.25428626663289017,
+        "mean_surface_ratio": 1.4438044910042054,
+        "n_complexes": 55,
+        "n_complexes_where_left_is_lower": 50
+      },
+      "n_complexes": 55
+    }
+  }
+}

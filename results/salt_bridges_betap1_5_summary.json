@@ -1,0 +1,58 @@
+{
+  "all": {
+    "density_ci": [
+      -28.962481066960112,
+      -4.477975205562593
+    ],
+    "density_difference_per_1000_a2": -13.45841993085349,
+    "density_excludes_zero": true,
+    "mean_design_bridges": 24.10909090909091,
+    "mean_native_bridges": 30.21818181818182,
+    "normalised_ci": [
+      -0.007782596639935136,
+      -0.004580909743443791
+    ],
+    "normalised_difference": -0.006087955296781086,
+    "normalised_excludes_zero": true,
+    "raw_ci": [
+      -8.418181818181818,
+      -3.9272727272727272
+    ],
+    "raw_difference": -6.109090909090909,
+    "raw_excludes_zero": true
+  },
+  "beta": 1.5,
+  "charge_composition": {
+    "ci": [
+      34.926818181818184,
+      45.36363636363637
+    ],
+    "difference": 40.163636363636364,
+    "excludes_zero": true,
+    "mean_design_charged_residues": 89.0,
+    "mean_native_charged_residues": 48.836363636363636
+  },
+  "cross_chain": {
+    "density_ci": [
+      -0.1751995516181882,
+      0.2537106537982249
+    ],
+    "density_difference_per_1000_a2": 0.03764764671239225,
+    "density_excludes_zero": false,
+    "mean_design_bridges": 0.6545454545454545,
+    "mean_native_bridges": 0.5636363636363636,
+    "normalised_ci": [
+      -0.00037507054678124384,
+      5.7963650932725196e-05
+    ],
+    "normalised_difference": -0.00014444217460457036,
+    "normalised_excludes_zero": false,
+    "raw_ci": [
+      -0.14545454545454545,
+      0.34545454545454546
+    ],
+    "raw_difference": 0.09090909090909091,
+    "raw_excludes_zero": false
+  },
+  "n_complexes": 55
+}

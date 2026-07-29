@@ -1,0 +1,31 @@
+{
+  "conclusion": "buffering depends on partner context",
+  "effect_of_removing_the_partner": {
+    "ci": [
+      0.15341451836438888,
+      0.290093856773069
+    ],
+    "estimate": 0.2220505307621874,
+    "excludes_zero": true,
+    "n_weakened": 38
+  },
+  "isolated_arm": {
+    "ci": [
+      0.041967485101068826,
+      0.08910294538559049
+    ],
+    "excludes_zero": true,
+    "mean_interface_minus_surface": 0.06597175046046447,
+    "n_buffering": 9
+  },
+  "n_complexes": 44,
+  "paired_arm": {
+    "ci": [
+      -0.22563201596418095,
+      -0.08598615737721269
+    ],
+    "excludes_zero": true,
+    "mean_interface_minus_surface": -0.15607878030172292,
+    "n_buffering": 34
+  }
+}

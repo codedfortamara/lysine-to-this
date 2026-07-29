@@ -1,0 +1,79 @@
+{
+  "created_utc": "2026-07-27T07:40:36+00:00",
+  "environment": {
+    "machine": "x86_64",
+    "packages": {
+      "biopython": "1.87",
+      "freesasa": "2.2.1",
+      "matplotlib": "3.11.1",
+      "modal": null,
+      "numpy": "2.4.6",
+      "pandas": "3.0.5",
+      "scipy": null
+    },
+    "platform": "Linux-6.18.5-x86_64-with-glibc2.39",
+    "python": "3.11.15",
+    "python_implementation": "CPython"
+  },
+  "git": {
+    "branch": "claude/lysine-to-this-plan-kfmjfn",
+    "commit": "d4538524edb01b756ee5eae139c575edd4cd3e67",
+    "dirty": false,
+    "dirty_paths": []
+  },
+  "inputs": [
+    {
+      "path": "results/charge_partitions.csv",
+      "sha256": "30f948205139311dcc93293b2b1b6639f5fa3d3501af324c72350f7bc968ff8b",
+      "size_bytes": 54065
+    },
+    {
+      "path": "results/complementarity.csv",
+      "sha256": "21741488b376b1e4b8f6dafc0ab64a4635a9913f372c36002db2137ff513b142",
+      "size_bytes": 27747
+    }
+  ],
+  "manifest_hash": "80a7d43243ac77720e8fe91e32e6fc3a1f80708bfda741e9c47093bf89585d2d",
+  "notes": {
+    "n_complexes": 55
+  },
+  "outputs": [
+    {
+      "path": "/home/user/lysine-to-this/results/analysis_per_complex.csv",
+      "sha256": "79cd3c31b4cc9ead2f420cda5ca84b4ef127205187834691807bf198eac8d933",
+      "size_bytes": 17727
+    },
+    {
+      "path": "/home/user/lysine-to-this/results/analysis_summary.json",
+      "sha256": "1144d8ce59809a4b45dc9a4d2b11ef30aa9ca54282584d826ebf49a39e929218",
+      "size_bytes": 2367
+    }
+  ],
+  "parameters": {
+    "af2_metrics_present": false,
+    "charge": {
+      "include_cys_tyr": true,
+      "include_termini": true,
+      "ph": 7.4,
+      "pka_set": "emboss",
+      "reported_charge_tolerance": 0.51
+    },
+    "complementarity_present": true,
+    "definitions": [
+      "simple"
+    ],
+    "min_betas_for_slope": 3,
+    "partitions": [
+      "interface",
+      "surface",
+      "core"
+    ]
+  },
+  "schema_version": 1,
+  "script": "04_join_and_analyse.py",
+  "script_sha256": "1ad3505a4a793c16ab7297353cd46261f3ba62ceb7e927d5771dca84fa192e2a",
+  "seeds": {
+    "bootstrap_seed": 0
+  },
+  "status": "completed"
+}
