@@ -102,9 +102,17 @@ def clear_directory(path: Path, attempts: int = 5) -> None:
         Path(target).chmod(stat.S_IWRITE)
         func(target)
 
+    # rmtree renamed this callback in 3.12 and both spellings have to work: the
+    # analysis runs on 3.11 in CI and 3.12 on the machine that assembles the
+    # package, and a portability break here fails at the last step of the whole
+    # pipeline.
+    callback = (
+        {"onexc": make_writable} if sys.version_info >= (3, 12) else {"onerror": make_writable}
+    )
+
     for attempt in range(attempts):
         try:
-            shutil.rmtree(path, onexc=make_writable)
+            shutil.rmtree(path, **callback)
             return
         except PermissionError as exc:
             if attempt == attempts - 1:
