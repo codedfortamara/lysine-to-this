@@ -170,6 +170,37 @@ local files only.
 Every output carries a manifest with input file hashes, git commit, package
 versions, seeds and parameters. Figures embed the manifest hash.
 
+## What is not in this directory, and where to get it
+
+Everything needed to reproduce the three findings is here, except the inputs
+that are yours already.
+
+**Your own tables.** `designs.csv` and `test_set.csv` are gitignored throughout:
+they are your data and not mine to redistribute. Put them in `data/raw/`. The
+loaders validate the schema and fail loudly on anything missing or malformed
+rather than coercing it.
+
+**Native structures.** Also not included. `python scripts/00_fetch_natives.py`
+downloads them from the RCSB by `pdb_id` straight from `test_set.csv`, so
+nothing has to be moved by hand.
+
+**The ablation designs are included**, in `data/ablation/paired` and
+`data/ablation/isolated`, because regenerating them means a full ProteinMPNN
+pass over all 55 complexes with the partner chain deleted. Without them the
+causal result cannot be checked without a GPU and several hours.
+
+**The MSA cache is not, and cannot be.** It lives on a Modal volume tied to my
+account. `modal run modal_app/af2_multimer.py::prefetch` rebuilds it: 55
+searches against the free MMseqs2 server, run on CPU containers four at a time,
+which cost 0.86 USD and about 15 minutes when I did it. Do this **before** any
+GPU run. The prediction path refuses to search on a GPU by default, because
+doing so bills an HTTP queue at GPU rates and was the first expensive mistake of
+this project.
+
+**The 37 AlphaFold results** are in `results/af2_metrics.csv` if that file is
+present. If it is missing, the grid never completed on the machine that
+assembled this and there is nothing to collect.
+
 ## Needs your decision
 
 **1. Salt bridges overlap.** The paper reports a proxy count of oppositely
