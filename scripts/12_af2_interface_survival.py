@@ -301,6 +301,18 @@ def build_parser() -> argparse.ArgumentParser:
         default=PLDDT_FLOOR,
         help="Designed-chain pLDDT at or above which a design counts as folded",
     )
+    parser.add_argument(
+        "--uncontrolled-rows",
+        choices=("refuse", "drop", "no-control"),
+        default="refuse",
+        help=(
+            "What to do when some rows carry designed_chain_plddt and others do "
+            "not, which happens when a grid spans a code change or two backends. "
+            "'refuse' stops and explains, 'drop' excludes those rows and keeps "
+            "the control, 'no-control' keeps every row and reports the "
+            "unfiltered result only."
+        ),
+    )
     parser.add_argument("--seed", type=int, default=0)
     return add_common_arguments(parser)
 
@@ -352,14 +364,40 @@ def main(argv: list[str] | None = None) -> int:
                 if "source" in table.columns
                 else ["unrecorded"]
             )
-            fail(
-                f"{int(blank.sum())} of {len(table)} row(s) have no "
-                f"designed_chain_plddt, from {sources}, while the rest do.\n"
-                "The fold-quality subset would then be selected by which backend "
-                "ran the job as much as\nby whether the design folded. Re-collect "
-                "those jobs, or drop the column entirely and\nreport the "
-                "unfiltered result alone, but do not run this half and half."
-            )
+            if args.uncontrolled_rows == "refuse":
+                fail(
+                    f"{int(blank.sum())} of {len(table)} row(s) have no "
+                    f"designed_chain_plddt, from {sources}, while the rest do.\n"
+                    "The fold-quality subset would then be selected by which "
+                    "backend ran the job as much as\nby whether the design "
+                    "folded. Choose explicitly:\n\n"
+                    "  --uncontrolled-rows drop     exclude those rows entirely, "
+                    "keeping the control valid\n"
+                    "  --uncontrolled-rows no-control  keep every row and report "
+                    "the unfiltered result only\n\n"
+                    "Both are defensible and both must be stated in the paper. "
+                    "Running half and half is not."
+                )
+            if args.uncontrolled_rows == "drop":
+                print(
+                    f"note: dropping {int(blank.sum())} row(s) with no "
+                    f"designed_chain_plddt, from {sources}. The fold-quality "
+                    "control is computed on the remainder and the exclusion "
+                    "belongs in the supplement.",
+                    file=sys.stderr,
+                )
+                table = table[~blank].reset_index(drop=True)
+                n_complexes = int(table["pdb_id"].nunique())
+            else:
+                print(
+                    f"note: {int(blank.sum())} row(s) have no "
+                    f"designed_chain_plddt, so the fold-quality control is "
+                    "switched off entirely and only the unfiltered result is "
+                    "reported. A degraded interface cannot be distinguished "
+                    "from a design that did not fold.",
+                    file=sys.stderr,
+                )
+                folded_available = False
 
     with run_manifest(
         script=Path(__file__),

@@ -303,12 +303,33 @@ class AF2Params:
     """
 
     #: GPU type requested from Modal.
-    gpu_type: str = "A100-40GB"
+    #:
+    #: L4, not A100. Three reasons, all of them money.
+    #:
+    #: It costs 0.80 an hour against 2.10. It is slower per job, perhaps two to
+    #: three times, so the cost per job comes out lower rather than merely
+    #: proportional. And it is far less contended: the A100 pool is the most
+    #: fought over Modal has, which on 29 July put containers into a preemption
+    #: loop that ran 141 minutes, completed nothing, and was billed in full.
+    #:
+    #: 24 GB is ample for what remains. The complexes under 450 residues have a
+    #: median total length of 270, and AlphaFold-Multimer memory grows with the
+    #: square of length. The nine complexes that need more than this are exactly
+    #: the ones already excluded on cost.
+    gpu_type: str = "L4"
 
-    #: Per-call timeout in seconds. One obvious constant, sized for the largest
-    #: complex in the set rather than the median. Two hours is deliberately
-    #: generous: a killed job at hour two costs far more than an idle slot.
-    timeout_s: int = 7200
+    #: Per-call timeout in seconds, sized for the work that remains.
+    #:
+    #: Was 7200, on the reasoning that a killed job costs more than an idle
+    #: slot. That reasoning was wrong, and expensively so: it meant every job
+    #: that went wrong ran for two hours before anything noticed. 2ZXE did that
+    #: three separate times and produced nothing.
+    #:
+    #: A 270-residue complex on an L4 should fold in well under fifteen minutes.
+    #: Anything still running at twenty is not slow, it is stuck, and the cheap
+    #: response is to kill it and move on. This caps the cost of any single
+    #: failure at one eighth of what it was.
+    timeout_s: int = 1200
 
     #: Number of AlphaFold model parameter sets to run per job.
     num_models: int = 1
@@ -324,11 +345,21 @@ class AF2Params:
 
     #: Maximum number of containers Modal may run at once.
     #:
-    #: Raised from 20 after the first real batch. Cost is unaffected by this
-    #: number, since the same GPU-seconds are bought either way, but wall clock
-    #: divides by it, and at the measured 32 minutes per job the full grid is
-    #: seven hours on twenty containers.
-    max_containers: int = 40
+    #: Low on purpose. This was 40, and that was costing money in two ways.
+    #:
+    #: Every container loads several gigabytes of AlphaFold parameters before it
+    #: folds anything, and that load is billed. Forty containers running 99 jobs
+    #: means roughly one job each, so the model is loaded 40 times rather than
+    #: 6, and the whole of that overhead is paid rather than amortised.
+    #:
+    #: Wide fan-out also multiplies exposure to preemption. Every container is
+    #: independently reclaimable, and a container reclaimed mid-job loses its
+    #: work and restarts from the beginning, having been billed for both.
+    #:
+    #: Six containers over 99 jobs is about sixteen jobs each. Slower in wall
+    #: clock, considerably cheaper, and far less likely to spend an afternoon
+    #: restarting.
+    max_containers: int = 6
 
     #: What Modal actually bills, divided by what the completed jobs account for.
     #:
@@ -375,11 +406,31 @@ class AF2Params:
     #: at the call site, and it is recorded in every manifest.
     ipsae_pae_cutoff_a: float = 10.0
 
-    #: Published on-demand price per GPU-hour in US dollars, used only for the
-    #: dry-run estimate. CHECK AGAINST CURRENT MODAL PRICING before quoting a
-    #: number to anyone: these were recorded from memory and modal.com was not
-    #: reachable to verify them.
-    usd_per_gpu_hour: float = 2.10
+    #: Price per GPU-hour in US dollars. Left at 0.0 to derive it from
+    #: :attr:`gpu_type`, which is almost always what is wanted.
+    #:
+    #: It used to be a hardcoded 2.10, independent of which card was requested.
+    #: Switching to an L4 therefore left the budget guard pricing every second
+    #: at A100 rates, nearly three times the truth. That errs towards stopping
+    #: rather than overspending, so it was not dangerous, but a guard that does
+    #: not know what the hardware costs cannot be reasoned about.
+    #:
+    #: Rates are UNVERIFIED, recorded from memory. Check modal.com/pricing
+    #: before quoting a number to anyone.
+    usd_per_gpu_hour: float = 0.0
+
+    def rate_usd_per_hour(self) -> float:
+        """The configured rate, or the published one for the configured GPU."""
+        if self.usd_per_gpu_hour > 0.0:
+            return self.usd_per_gpu_hour
+        rate = MODAL_GPU_RATES_USD_PER_HOUR.get(self.gpu_type)
+        if rate is None:
+            raise ValueError(
+                f"no published rate recorded for GPU {self.gpu_type!r}. Add one to "
+                f"MODAL_GPU_RATES_USD_PER_HOUR or set usd_per_gpu_hour explicitly; "
+                "a budget guard with no price is not a guard."
+            )
+        return rate
 
     #: Cold start per container: image pull plus loading the model parameters
     #: from the weights volume. Paid once per container, not once per job, so
@@ -390,6 +441,28 @@ class AF2Params:
     #: failures are not random; large and heavily charged complexes fail more
     #: often, so this is a floor rather than a typical case.
     failure_overhead: float = 0.10
+
+    #: Consecutive failures, with nothing succeeding in between, after which the
+    #: run stops itself.
+    #:
+    #: On 29 July a driver failed 20 jobs, completed 0, and kept dispatching for
+    #: 141 minutes with ten GPUs attached. Nothing in the code was watching. A
+    #: systematic failure repeats by definition, so the only question is how many
+    #: times it is paid for before someone notices, and the answer should not
+    #: depend on someone noticing.
+    #:
+    #: Four is deliberately tight. Scattered failures are normal and reset the
+    #: counter; four in a row with no success between them is a broken run.
+    max_consecutive_failures: int = 4
+
+    #: Minimum jobs attempted before the overall failure rate is allowed to stop
+    #: a run, so that a single unlucky first job does not.
+    failure_rate_min_attempts: int = 8
+
+    #: Overall failure rate above which the run stops, once enough jobs have been
+    #: attempted to measure it. Catches the case the consecutive counter misses:
+    #: alternating success and failure, which is still half the money wasted.
+    max_failure_rate: float = 0.5
 
     #: Wall-clock estimate per job in minutes.
     #:

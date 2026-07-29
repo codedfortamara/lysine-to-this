@@ -506,7 +506,10 @@ def test_timeout_is_a_single_named_constant() -> None:
     from interface_charge.config import DEFAULT_CONFIG
 
     assert DEFAULT_CONFIG.af2.timeout_s == af2_multimer.TIMEOUT_S
-    assert af2_multimer.TIMEOUT_S >= 3600
+    # Generous enough for the largest complex still in scope, tight enough that a
+    # stuck job is killed rather than billed for hours. It was 7200, and every
+    # job that went wrong ran the full two hours before anything noticed.
+    assert 600 <= af2_multimer.TIMEOUT_S <= 3600
 
 
 def test_redesigned_chain_uses_single_sequence_mode(tmp_path, structure_case, extracts) -> None:
@@ -933,12 +936,72 @@ def test_only_one_driver_may_dispatch_at_a_time() -> None:
     assert source.index("lease_path.is_file()") < source.index("predict.map")
 
 
+def test_the_lease_outlasts_a_batch_by_a_wide_margin() -> None:
+    """A lease shorter than a batch expires under a driver that is working.
+
+    The heartbeat is written between batches, so a batch running to the timeout
+    must not be long enough to let the lease go stale. Otherwise a second driver
+    concludes the first is dead, takes the lease, and both dispatch, which is
+    the exact failure the lease exists to prevent.
+    """
+    af2 = _af2()
+    assert af2.LEASE_STALE_AFTER_S >= 2 * af2.TIMEOUT_S
+
+
 def test_the_lease_goes_stale_so_a_crash_does_not_block_the_grid() -> None:
     af2 = _af2()
-    assert 0 < af2.LEASE_STALE_AFTER_S <= 3600
+    assert af2.LEASE_STALE_AFTER_S <= 6 * 3600, "a crashed driver must not block for a day"
     source = _function_source(af2, "drive")
     assert "take_lease()" in source
     assert "lease_path.unlink()" in source, "a finished driver must release its lease"
+
+
+def test_only_the_holder_may_release_the_lease() -> None:
+    """Deleting another driver's lease would silently permit a second dispatcher."""
+    af2 = _af2()
+    source = _function_source(af2, "drive")
+    release = source[
+        source.index("lease_path.unlink()") - 400 : source.index("lease_path.unlink()")
+    ]
+    assert '"run_id") == run_id' in release
+
+
+def test_an_unreadable_ledger_refuses_rather_than_resetting_the_budget() -> None:
+    """Reading a corrupt ledger as zero hands back the entire budget."""
+    af2 = _af2()
+    source = _function_source(af2, "drive")
+    assert "could not be read" in source
+    assert "hand back" in source
+
+
+def test_the_fold_marker_requires_a_structure_not_just_scores() -> None:
+    """Scores without a PDB produce a complete-looking metrics.json with no
+    structure behind it, and a note blaming a missing native."""
+    af2 = _af2()
+    source = _function_source(af2, "predict")
+    assert "structures_written" in source
+    assert "expected_residues" in source, "the scores must describe this job's length"
+
+
+def test_a_failure_is_charged_at_the_timeout_not_at_a_fast_success() -> None:
+    """The eighty-fold undercharge.
+
+    Failures are overwhelmingly jobs that ran until something killed them;
+    successes are jobs that finished quickly. Charging failures at the success
+    mean made a one minute success turn a two-attempt timeout into 22 cents
+    instead of 17.64 dollars, inside the guard whose whole purpose is stopping
+    runaway spend.
+    """
+    af2 = _af2()
+    guard = af2.BudgetGuard(ceiling_usd=1e9, usd_per_gpu_hour=3600.0, billing_overhead=1.0)
+    guard.record(60.0)  # one fast success
+    before = guard.spent_usd
+    guard.record_failure(attempts=2)
+    charged = guard.spent_usd - before
+    assert charged == pytest.approx(2 * af2.PARAMS.timeout_s), (
+        "a failure must be charged at the full timeout per attempt"
+    )
+    assert charged >= 20 * 60.0, "and must not be anchored to the fast success"
 
 
 def test_the_ceiling_is_a_total_not_a_per_launch_allowance() -> None:
@@ -964,3 +1027,125 @@ def test_folding_is_not_repeated_when_only_the_metrics_fail() -> None:
     assert "Refusing to mark this job as folded" in source, (
         "the marker must only be written once the outputs are known to exist"
     )
+
+
+# ---------------------------------------------------------------------------
+# The circuit breaker
+# ---------------------------------------------------------------------------
+
+
+def test_a_run_that_only_fails_stops_itself() -> None:
+    """29 July: 20 failed, 0 completed, 141 minutes, ten GPUs, nothing watching."""
+    af2 = _af2()
+    verdict = af2.failure_verdict(n_completed=0, n_failed=20, consecutive_failures=20)
+    assert verdict
+    assert "consecutive failures" in verdict
+
+
+def test_scattered_failures_do_not_stop_a_working_run() -> None:
+    """Preemption and the odd bad job are normal; a healthy run must continue."""
+    af2 = _af2()
+    assert not af2.failure_verdict(n_completed=40, n_failed=2, consecutive_failures=1)
+
+
+def test_alternating_success_and_failure_is_caught_by_the_rate() -> None:
+    """The consecutive counter never trips here, and half the money is wasted."""
+    af2 = _af2()
+    verdict = af2.failure_verdict(n_completed=5, n_failed=9, consecutive_failures=1)
+    assert verdict
+    assert "rate of" in verdict
+
+
+def test_one_early_failure_does_not_stop_the_run() -> None:
+    """A rate of 100% over one job is not evidence of anything."""
+    af2 = _af2()
+    assert not af2.failure_verdict(n_completed=0, n_failed=1, consecutive_failures=1)
+
+
+def test_consecutive_failures_are_counted_from_the_end_of_the_batch() -> None:
+    """Where a run that has just broken shows it."""
+    af2 = _af2()
+    ok = {"wall_clock_s": 120.0}
+    assert af2.consecutive_failures([ok, ok, ok]) == 0
+    assert af2.consecutive_failures([ok, RuntimeError(), RuntimeError()]) == 2
+    assert af2.consecutive_failures([RuntimeError(), ok, RuntimeError()]) == 1
+    assert af2.consecutive_failures([RuntimeError()] * 5) == 5
+
+
+def test_a_result_without_a_wall_clock_counts_as_a_failure() -> None:
+    """A dict that carries no timing did not fold anything."""
+    af2 = _af2()
+    assert af2.consecutive_failures([{"error": "boom"}]) == 1
+
+
+def test_the_driver_consults_the_circuit_breaker() -> None:
+    af2 = _af2()
+    source = _function_source(af2, "drive")
+    assert "failure_verdict(" in source
+    assert "consecutive_failures(batch_results)" in source
+
+
+def test_the_hardware_is_chosen_for_cost() -> None:
+    """A100 is the priciest and most contended card Modal has.
+
+    The complexes still in scope have a median total length of 270 residues and
+    a maximum of 448, which fits 24 GB with room to spare.
+    """
+    from interface_charge.config import DEFAULT_CONFIG, MODAL_GPU_RATES_USD_PER_HOUR
+
+    rate = MODAL_GPU_RATES_USD_PER_HOUR[DEFAULT_CONFIG.af2.gpu_type]
+    assert rate <= 1.10, f"{DEFAULT_CONFIG.af2.gpu_type} at ${rate}/hour is not a low-cost choice"
+
+
+def test_containers_are_few_enough_to_amortise_the_model_load() -> None:
+    """Every container loads several GB of parameters, and that load is billed.
+
+    Forty containers over 99 jobs paid it forty times instead of six. Wide
+    fan-out also multiplies exposure to preemption, and a container reclaimed
+    mid-job loses its work having been billed for it.
+    """
+    from interface_charge.config import DEFAULT_CONFIG
+
+    assert DEFAULT_CONFIG.af2.max_containers <= 10
+
+
+def test_the_budget_guard_knows_what_the_hardware_costs() -> None:
+    """The rate was hardcoded at 2.10 regardless of which card was requested.
+
+    Switching to an L4 left the guard pricing every second at A100 rates. That
+    errs towards stopping rather than overspending, so it was not dangerous, but
+    a guard that does not know the price of the hardware cannot be reasoned
+    about, and the same defect in the other direction would be.
+    """
+    from interface_charge.config import MODAL_GPU_RATES_USD_PER_HOUR, AF2Params
+
+    for gpu, rate in MODAL_GPU_RATES_USD_PER_HOUR.items():
+        assert AF2Params(gpu_type=gpu).rate_usd_per_hour() == rate
+
+
+def test_an_explicit_rate_still_wins() -> None:
+    from interface_charge.config import AF2Params
+
+    assert AF2Params(gpu_type="L4", usd_per_gpu_hour=9.99).rate_usd_per_hour() == 9.99
+
+
+def test_an_unknown_gpu_has_no_price_and_says_so() -> None:
+    """Silently costing an unknown card at zero would disable the ceiling."""
+    from interface_charge.config import AF2Params
+
+    with pytest.raises(ValueError, match="not a guard"):
+        AF2Params(gpu_type="RTX4090").rate_usd_per_hour()
+
+
+def test_a_single_stuck_job_cannot_cost_much() -> None:
+    """The number that mattered most last night, and nobody was watching it.
+
+    A job that hangs is capped by the timeout times the hourly rate. It was two
+    hours on an A100, which is 4.20 a time, and 2ZXE spent that three times over
+    and produced nothing.
+    """
+    from interface_charge.config import DEFAULT_CONFIG
+
+    params = DEFAULT_CONFIG.af2
+    worst_case = params.timeout_s / 3600.0 * params.rate_usd_per_hour()
+    assert worst_case <= 0.50, f"a stuck job can still cost ${worst_case:.2f}"

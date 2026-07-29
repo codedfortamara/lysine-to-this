@@ -103,7 +103,7 @@ TIMEOUT_S: int = PARAMS.timeout_s
 #: How long a run lease survives without a heartbeat before another driver may
 #: take it. Longer than a batch, so a driver busy folding is never displaced,
 #: and short enough that a crashed one does not block the grid for an evening.
-LEASE_STALE_AFTER_S: int = 1800
+LEASE_STALE_AFTER_S: int = max(4 * PARAMS.timeout_s, 3600)
 
 #: Container dependencies, and the constraints they have to satisfy.
 #:
@@ -604,18 +604,26 @@ class BudgetGuard:
         burned six GPU-hours and moved the counter by zero, and the ceiling then
         let further batches start.
 
-        Charged at the observed median where one exists, and at the full timeout
-        otherwise, multiplied by ``attempts`` to cover the automatic retry. That
-        is deliberately pessimistic. A guard that under-charges failures cannot
-        stop a systematically failing run, which is precisely the run that most
-        needs stopping.
+        Charged at the **full timeout** per attempt, always.
 
-        Not counted towards ``n_recorded``, because these carry no timing and
-        would corrupt the observed per-job median used for projection.
+        The first version of this charged at the observed mean of successful
+        jobs where one existed, and called that pessimistic. It is the opposite.
+        A failure is overwhelmingly likely to be a job that ran until something
+        killed it, which is the timeout; a success is a job that finished
+        quickly. So after one fast success every subsequent timeout was charged
+        at the fast number. Measured on this configuration that is a one minute
+        success making a two-attempt timeout cost 22 cents instead of 17.64
+        dollars, an eighty-fold undercharge, in a guard whose entire job is to
+        stop runaway spend.
+
+        There is no duration on the exception to do better with. Given the
+        choice between assuming a failure was cheap and assuming it was
+        expensive, only one of those errs towards stopping.
+
+        Not counted towards ``n_recorded``, because these carry no measured
+        timing and would corrupt the per-job mean used for projection.
         """
-        observed = self.observed_minutes_per_job()
-        seconds = observed * 60.0 if observed is not None else float(PARAMS.timeout_s)
-        self.failed_gpu_seconds += seconds * max(1, int(attempts))
+        self.failed_gpu_seconds += float(PARAMS.timeout_s) * max(1, int(attempts))
         self.n_failures += 1
 
     @property
@@ -954,6 +962,61 @@ def require_gpu_backend() -> str:
     )
 
 
+def consecutive_failures(batch_results: list) -> int:
+    """How many results at the end of a batch were failures, in a row.
+
+    Counted from the end because that is where a run that has just broken shows
+    it. Scattered failures earlier in the batch are normal and are caught by the
+    rate check instead.
+    """
+    count = 0
+    for result in reversed(batch_results):
+        if isinstance(result, dict) and result.get("wall_clock_s") is not None:
+            break
+        count += 1
+    return count
+
+
+def failure_verdict(
+    n_completed: int,
+    n_failed: int,
+    consecutive_failures: int,
+    params: AF2Params = PARAMS,
+) -> str:
+    """Should this run stop? Returns the reason, or an empty string to continue.
+
+    Two independent triggers, because they catch different shapes of failure.
+
+    A run of consecutive failures is the obvious one: something has broken and
+    every further job pays for the same breakage. A high overall rate catches
+    what the counter misses, which is alternating success and failure. That
+    looks healthy from any single batch and is still half the money wasted.
+
+    Kept as a free function so that both can be tested without Modal, a GPU, or
+    a network. The version of this that mattered did not exist at all, and a
+    driver ran for 141 minutes at ten GPUs with nothing succeeding.
+    """
+    if consecutive_failures >= params.max_consecutive_failures:
+        return (
+            f"{consecutive_failures} consecutive failures with no success between "
+            f"them, at or above the limit of {params.max_consecutive_failures}. "
+            "A systematic failure repeats, so continuing pays for the same fault "
+            "again. Nothing in flight was cancelled. Check the container logs "
+            "before restarting."
+        )
+
+    attempted = n_completed + n_failed
+    if attempted >= params.failure_rate_min_attempts:
+        rate = n_failed / attempted
+        if rate > params.max_failure_rate:
+            return (
+                f"{n_failed} of {attempted} job(s) failed, a rate of {rate:.0%}, "
+                f"above the limit of {params.max_failure_rate:.0%}. More than half "
+                "the GPU time is buying nothing. Nothing in flight was cancelled."
+            )
+    return ""
+
+
 def searches_required(jobs: list[Job]) -> list[tuple[str, str, str]]:
     """Every distinct homology search the grid needs, as (pdb_id, chain, sequence).
 
@@ -1157,10 +1220,31 @@ if MODAL_AVAILABLE:  # pragma: no cover - requires Modal
             )
             # The expensive part is done. Record that fact before touching any
             # metric code, so a defect below cannot buy this prediction twice.
-            if not sorted(out_dir.glob("*scores*.json")):
+            # The marker means "the expensive part produced usable output", so
+            # it has to check that it did. A scores JSON alone is not enough: a
+            # run can leave scores and no structure, and collect_metrics would
+            # then write a complete-looking metrics.json with predicted_pdb null
+            # and an interface RMSD note blaming a missing native. Two silent
+            # wrongs presented as one complete job.
+            scores_written = sorted(out_dir.glob("*scores*.json"))
+            structures_written = sorted(out_dir.glob("*.pdb"))
+            if not scores_written or not structures_written:
                 raise FileNotFoundError(
-                    f"colabfold_run returned but wrote no scores JSON in {out_dir}. "
-                    "Refusing to mark this job as folded."
+                    f"colabfold_run returned but {out_dir} has "
+                    f"{len(scores_written)} scores file(s) and "
+                    f"{len(structures_written)} structure file(s). Both are "
+                    "required. Refusing to mark this job as folded, because a "
+                    "retry that skipped folding would then produce metrics with "
+                    "no structure behind them."
+                )
+            expected_residues = sum(len(job.chains[c]) for c in ordered)
+            probe = json.loads(scores_written[0].read_text())
+            if len(probe.get("plddt", [])) != expected_residues:
+                raise ValueError(
+                    f"{scores_written[0].name} has "
+                    f"{len(probe.get('plddt', []))} pLDDT values for a complex of "
+                    f"{expected_residues} residues. The scores do not describe "
+                    "this job, so nothing downstream of them can be trusted."
                 )
             folded_path.write_text(
                 json.dumps(
@@ -1466,10 +1550,20 @@ if MODAL_AVAILABLE:  # pragma: no cover - requires Modal
         if ledger_path.is_file():
             try:
                 prior_usd = float(json.loads(ledger_path.read_text()).get("total_usd", 0.0))
-            except (ValueError, OSError):
-                prior_usd = 0.0
+            except (ValueError, OSError, TypeError) as exc:
+                # Defaulting to zero here would silently restore the whole
+                # budget, which is the one direction this must never fail in.
+                return {
+                    "refused": True,
+                    "reason": (
+                        f"the spend ledger at {ledger_path} could not be read "
+                        f"({exc!r}). Treating that as zero spent would hand back "
+                        "the entire budget on a corrupt file. Inspect or delete "
+                        "it deliberately before launching."
+                    ),
+                }
 
-        guard = BudgetGuard(max(budget_usd - prior_usd, 0.01), PARAMS.usd_per_gpu_hour)
+        guard = BudgetGuard(max(budget_usd - prior_usd, 0.01), PARAMS.rate_usd_per_hour())
         completed = 0
         failures: list[str] = []
         stopped_early = ""
@@ -1537,11 +1631,14 @@ if MODAL_AVAILABLE:  # pragma: no cover - requires Modal
                         f"{guard.status()}. Nothing in flight was cancelled."
                     )
                     break
-                for result in predict.map(
-                    [asdict(job) for job in batch],
-                    kwargs={"allow_msa_search": False},
-                    return_exceptions=True,
-                ):
+                batch_results = list(
+                    predict.map(
+                        [asdict(job) for job in batch],
+                        kwargs={"allow_msa_search": False},
+                        return_exceptions=True,
+                    )
+                )
+                for result in batch_results:
                     if isinstance(result, dict) and result.get("wall_clock_s") is not None:
                         guard.record(result["wall_clock_s"])
                         completed += 1
@@ -1552,15 +1649,34 @@ if MODAL_AVAILABLE:  # pragma: no cover - requires Modal
                         # run, which is the run that most needs stopping.
                         guard.record_failure()
                         failures.append(repr(result)[:200])
+
+                # Stop a run that is not working, without waiting to be noticed.
+                #
+                # On 29 July a driver failed 20 and completed 0 while holding
+                # ten GPUs for 141 minutes. A systematic failure repeats by
+                # definition; the only variable is how many times it is paid for
+                # first, and that should not depend on someone checking the
+                # dashboard.
+                verdict = failure_verdict(
+                    n_completed=completed,
+                    n_failed=len(failures),
+                    consecutive_failures=consecutive_failures(batch_results),
+                )
+                if verdict:
+                    stopped_early = verdict
+                    publish("running")
+                    break
                 publish("running")
 
         publish("finished")
         # Release rather than let it go stale, so the next launch is not made to
         # wait for a driver that has already finished.
         try:
-            lease_path.unlink()
-            results_volume.commit()
-        except OSError:
+            results_volume.reload()
+            if json.loads(lease_path.read_text()).get("run_id") == run_id:
+                lease_path.unlink()
+                results_volume.commit()
+        except (OSError, ValueError):
             pass
 
         return {
@@ -2042,7 +2158,7 @@ if MODAL_AVAILABLE:  # pragma: no cover - requires Modal
             return
 
         waves = split_into_waves(outstanding, WAVE_BETAS)
-        guard = BudgetGuard(budget_usd, PARAMS.usd_per_gpu_hour)
+        guard = BudgetGuard(budget_usd, PARAMS.rate_usd_per_hour())
 
         print(f"\nplan: {len(waves)} wave(s), ceiling ${budget_usd:.2f}")
         for index, wave_jobs in enumerate(waves, start=1):
@@ -2525,7 +2641,10 @@ def interface_rmsd(
         structure_params=config.structure,
     )
     interface_ids = definition.classification_for(designed_chain).ids_in(Partition.INTERFACE)
-    wanted = {rid.seqid for rid in interface_ids}
+    # Keyed on the insertion code as well as the number. A chain carrying 52,
+    # 52A and 52B has three distinct residues there, and a set of bare integers
+    # would pull all three in whenever any one of them is at the interface.
+    wanted = {(rid.seqid, rid.icode or " ") for rid in interface_ids}
 
     def ordered_residues(model, chain_label: str) -> list:
         """Polymer residues of a chain in file order, hetero and water excluded."""
@@ -2574,7 +2693,7 @@ def interface_rmsd(
             ordered_residues(native, designed_chain),
             ordered_residues(predicted, predicted_labels[designed_chain]),
         )
-        if n.id[1] in wanted and backbone_atoms(n) and backbone_atoms(p)
+        if (n.id[1], n.id[2] or " ") in wanted and backbone_atoms(n) and backbone_atoms(p)
     ]
     if not interface_pairs:
         return {
