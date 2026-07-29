@@ -636,6 +636,22 @@ def _af2():
     return af2_multimer
 
 
+def _function_source(af2, name: str) -> str:
+    """Source of a function by name, including ones nested inside the Modal block.
+
+    Read rather than imported because the Modal-only functions need colabfold
+    and a GPU to import, and these checks are about what the source does.
+    """
+    import ast
+
+    text = (REPO_ROOT / "modal_app" / "af2_multimer.py").read_text()
+    lines = text.splitlines()
+    for node in ast.walk(ast.parse(text)):
+        if isinstance(node, ast.FunctionDef) and node.name == name:
+            return "\n".join(lines[node.lineno - 1 : node.end_lineno])
+    raise AssertionError(f"{name} not found in af2_multimer.py")
+
+
 def _job(af2, pdb_id="1BRS", beta=0.0, replicate=0, primary_len=100, partner_len=100):
     return af2.Job(
         pdb_id=pdb_id,
@@ -852,3 +868,99 @@ def test_wave_one_covers_the_band_where_the_science_is() -> None:
     af2 = _af2()
     assert af2.WAVE_BETAS[0] == [0.0, -1.5, 1.5]
     assert af2.WAVE_BETAS[1] == [-3.0, 3.0]
+
+
+# ---------------------------------------------------------------------------
+# Findings from the adversarial review of e1937c5
+# ---------------------------------------------------------------------------
+
+
+def test_failed_jobs_are_charged_to_the_budget() -> None:
+    """The most expensive failure mode was invisible to the guard.
+
+    A job that hits the timeout or dies out of memory consumed GPU time and
+    produced nothing, and its exception carries no duration. Charging only
+    successes meant three attempts at the largest complex burned six GPU-hours
+    and moved the counter by zero, after which the ceiling happily let more
+    batches start.
+    """
+    af2 = _af2()
+    guard = af2.BudgetGuard(ceiling_usd=100.0, usd_per_gpu_hour=3600.0, billing_overhead=1.0)
+    guard.record(60.0)
+    after_success = guard.spent_usd
+    guard.record_failure()
+    assert guard.spent_usd > after_success, "a failure must cost something"
+
+
+def test_a_failure_does_not_corrupt_the_observed_per_job_time() -> None:
+    """Failures are charged pessimistically, so folding them into the mean would
+    make every projection pessimistic too."""
+    af2 = _af2()
+    guard = af2.BudgetGuard(ceiling_usd=100.0, usd_per_gpu_hour=2.10)
+    for _ in range(4):
+        guard.record(120.0)
+    before = guard.observed_minutes_per_job()
+    guard.record_failure()
+    assert guard.observed_minutes_per_job() == pytest.approx(before)
+
+
+def test_failures_are_charged_at_the_timeout_before_anything_is_measured() -> None:
+    """With no observation to go on, the pessimistic assumption is the safe one."""
+    af2 = _af2()
+    guard = af2.BudgetGuard(ceiling_usd=1e9, usd_per_gpu_hour=3600.0, billing_overhead=1.0)
+    guard.record_failure(attempts=1)
+    assert guard.spent_usd == pytest.approx(float(af2.PARAMS.timeout_s))
+
+
+def test_the_driver_charges_failures() -> None:
+    """The guard can only stop a systematically failing run if it is told."""
+    af2 = _af2()
+    source = _function_source(af2, "drive")
+    assert "guard.record_failure()" in source
+
+
+def test_only_one_driver_may_dispatch_at_a_time() -> None:
+    """Two drivers compute the same jobs and you pay twice.
+
+    metrics.json is not a mutex: both containers check it before either writes.
+    This happened on 28 July with three concurrent drivers.
+    """
+    af2 = _af2()
+    source = _function_source(af2, "drive")
+    assert "run_lease.json" in source
+    assert "LEASE_STALE_AFTER_S" in source
+    assert '"refused": True' in source
+    assert source.index("lease_path.is_file()") < source.index("predict.map")
+
+
+def test_the_lease_goes_stale_so_a_crash_does_not_block_the_grid() -> None:
+    af2 = _af2()
+    assert 0 < af2.LEASE_STALE_AFTER_S <= 3600
+    source = _function_source(af2, "drive")
+    assert "take_lease()" in source
+    assert "lease_path.unlink()" in source, "a finished driver must release its lease"
+
+
+def test_the_ceiling_is_a_total_not_a_per_launch_allowance() -> None:
+    """Relaunching four times under a $60 ceiling authorised $240 by accident."""
+    af2 = _af2()
+    source = _function_source(af2, "drive")
+    assert "spend_ledger.json" in source
+    assert "prior_usd" in source
+    assert "budget_usd - prior_usd" in source
+
+
+def test_folding_is_not_repeated_when_only_the_metrics_fail() -> None:
+    """Cheap post-processing shared a retry boundary with expensive inference.
+
+    metrics.json was the only completion marker, so any defect in
+    collect_metrics made Modal refold the complex from scratch.
+    """
+    af2 = _af2()
+    source = _function_source(af2, "predict")
+    assert "folded.json" in source
+    assert "already_folded" in source
+    assert source.index("already_folded = folded_path.is_file()") < source.index("colabfold_run(")
+    assert "Refusing to mark this job as folded" in source, (
+        "the marker must only be written once the outputs are known to exist"
+    )

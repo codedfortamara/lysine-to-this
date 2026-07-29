@@ -100,6 +100,11 @@ WAVE_BETAS: list[list[float]] = [[0.0, -1.5, 1.5], [-3.0, 3.0]]
 #: Per-call timeout in seconds. One constant, referenced everywhere.
 TIMEOUT_S: int = PARAMS.timeout_s
 
+#: How long a run lease survives without a heartbeat before another driver may
+#: take it. Longer than a batch, so a driver busy folding is never displaced,
+#: and short enough that a crashed one does not block the grid for an evening.
+LEASE_STALE_AFTER_S: int = 1800
+
 #: Container dependencies, and the constraints they have to satisfy.
 #:
 #: These bounds belong to colabfold 1.5.5, which declares ``biopython<1.83``,
@@ -580,12 +585,38 @@ class BudgetGuard:
         self.usd_per_gpu_hour = usd_per_gpu_hour
         self.billing_overhead = billing_overhead
         self.gpu_seconds = 0.0
+        self.failed_gpu_seconds = 0.0
         self.n_recorded = 0
+        self.n_failures = 0
 
     def record(self, wall_clock_s: float) -> None:
         """Account for one completed job."""
         self.gpu_seconds += max(0.0, float(wall_clock_s))
         self.n_recorded += 1
+
+    def record_failure(self, attempts: int = 2) -> None:
+        """Account for a job that failed, which is the expensive kind.
+
+        A job that hits the timeout or dies out of memory consumed GPU time and
+        produced nothing, and its exception carries no duration. The first
+        version of this guard charged only successes, so the most expensive
+        failure mode was invisible to it: three attempts at the largest complex
+        burned six GPU-hours and moved the counter by zero, and the ceiling then
+        let further batches start.
+
+        Charged at the observed median where one exists, and at the full timeout
+        otherwise, multiplied by ``attempts`` to cover the automatic retry. That
+        is deliberately pessimistic. A guard that under-charges failures cannot
+        stop a systematically failing run, which is precisely the run that most
+        needs stopping.
+
+        Not counted towards ``n_recorded``, because these carry no timing and
+        would corrupt the observed per-job median used for projection.
+        """
+        observed = self.observed_minutes_per_job()
+        seconds = observed * 60.0 if observed is not None else float(PARAMS.timeout_s)
+        self.failed_gpu_seconds += seconds * max(1, int(attempts))
+        self.n_failures += 1
 
     @property
     def spent_usd(self) -> float:
@@ -598,14 +629,20 @@ class BudgetGuard:
         roughly $26.00 actually billed, so a ceiling set at $54 would not have
         stopped anything until well past $100.
         """
-        return self.gpu_seconds / 3600.0 * self.usd_per_gpu_hour * self.billing_overhead
+        billable = self.gpu_seconds + self.failed_gpu_seconds
+        return billable / 3600.0 * self.usd_per_gpu_hour * self.billing_overhead
 
     @property
     def remaining_usd(self) -> float:
         return max(0.0, self.ceiling_usd - self.spent_usd)
 
     def observed_minutes_per_job(self) -> float | None:
-        """Measured median-free mean, or None before anything has returned."""
+        """Mean over jobs that actually returned, or None before any have.
+
+        Successes only. Failures are charged to the spend but excluded here,
+        because they carry no measured duration: folding them in would mean
+        projecting future batches from a number invented to be pessimistic.
+        """
         if not self.n_recorded:
             return None
         return self.gpu_seconds / self.n_recorded / 60.0
@@ -1033,12 +1070,27 @@ if MODAL_AVAILABLE:  # pragma: no cover - requires Modal
         job = Job(**job_payload)
         out_dir = Path(RESULTS_PATH) / job.key
         metrics_path = out_dir / "metrics.json"
+        folded_path = out_dir / "folded.json"
 
         if metrics_path.is_file():
             return json.loads(metrics_path.read_text())
 
         out_dir.mkdir(parents=True, exist_ok=True)
         started = time.time()
+
+        # Inference and metric extraction share one retry boundary, and they
+        # should not.
+        #
+        # metrics.json is the only completion marker, so if AlphaFold succeeds
+        # and then collect_metrics raises for any reason at all, Modal retries
+        # the whole function and folds the complex a second time. A defect in
+        # cheap post-processing buys the expensive prediction twice and still
+        # leaves the job incomplete.
+        #
+        # folded.json is written the moment the ColabFold outputs exist and
+        # validate. A retry that finds it skips straight to the metrics, so a
+        # post-processing bug costs seconds rather than another prediction.
+        already_folded = folded_path.is_file()
 
         # ColabFold takes a colon-joined multimer sequence. Chains are ordered
         # deterministically so that chain identity in the output is predictable.
@@ -1047,52 +1099,80 @@ if MODAL_AVAILABLE:  # pragma: no cover - requires Modal
 
         modes = msa_plan(job)
         msa_started = time.time()
-        a3m = build_mixed_a3m(
-            job,
-            ordered,
-            modes,
-            cache_dir=Path(RESULTS_PATH) / "msa_cache",
-            # A cache miss must not turn into an MMseqs2 search here. The search
-            # is an HTTP poll against a free shared server that queues under
-            # load, and this container is an A100. That is what the two-hour
-            # timeouts in the first pilot were: jobs sitting in a queue, billed
-            # at GPU rates, until the timeout killed them with nothing produced.
-            # Run ``prefetch`` first; it does the identical searches on CPU.
-            allow_search=allow_msa_search,
+        a3m = (
+            ""
+            if already_folded
+            else build_mixed_a3m(
+                job,
+                ordered,
+                modes,
+                cache_dir=Path(RESULTS_PATH) / "msa_cache",
+                # A cache miss must not turn into an MMseqs2 search here. The search
+                # is an HTTP poll against a free shared server that queues under
+                # load, and this container is an A100. That is what the two-hour
+                # timeouts in the first pilot were: jobs sitting in a queue, billed
+                # at GPU rates, until the timeout killed them with nothing produced.
+                # Run ``prefetch`` first; it does the identical searches on CPU.
+                allow_search=allow_msa_search,
+            )
         )
         msa_seconds = time.time() - msa_started
-        require_parseable_complex_a3m(a3m, [len(job.chains[c]) for c in ordered])
+        if not already_folded:
+            require_parseable_complex_a3m(a3m, [len(job.chains[c]) for c in ordered])
 
-        colabfold_run(
-            # Passing the alignment directly is what makes the mixed treatment
-            # possible. ColabFold's own ``msa_mode`` switch is all-or-nothing
-            # across the complex, so going through it would force either an MSA
-            # for the design or no MSA for the partner, and both are wrong.
-            #
-            # The alignment goes in as a one-element LIST, not a bare string.
-            # ColabFold indexes it as ``a3m_lines[0]``, so a string yields its
-            # first character, "#", which fails the complex-a3m check and falls
-            # through to a single-sequence fallback. That path does not raise:
-            # it would have run the whole grid against an empty alignment and
-            # returned confident-looking numbers with the MSA silently
-            # discarded.
-            queries=[(job.key, query_sequence, [a3m])],
-            result_dir=str(out_dir),
-            num_models=PARAMS.num_models,
-            num_recycles=PARAMS.num_recycles,
-            model_type=MODEL_TYPE,
-            msa_mode="single_sequence",
-            use_templates=False,
-            random_seed=PARAMS.random_seed,
-            is_complex=True,
-            rank_by="multimer",
-            # ColabFold's run() never downloads parameters; only its command
-            # line entry point does. Without this it looks in its default data
-            # directory, finds nothing, and fails. The weights volume is the
-            # whole reason cold starts are affordable.
-            data_dir=WEIGHTS_PATH,
-            user_agent=MMSEQS_USER_AGENT,
-        )
+        if already_folded:
+            fold_record = json.loads(folded_path.read_text())
+            msa_seconds = float(fold_record.get("msa_seconds", 0.0))
+            started -= float(fold_record.get("fold_seconds", 0.0)) + msa_seconds
+        else:
+            colabfold_run(
+                # Passing the alignment directly is what makes the mixed treatment
+                # possible. ColabFold's own ``msa_mode`` switch is all-or-nothing
+                # across the complex, so going through it would force either an MSA
+                # for the design or no MSA for the partner, and both are wrong.
+                #
+                # The alignment goes in as a one-element LIST, not a bare string.
+                # ColabFold indexes it as ``a3m_lines[0]``, so a string yields its
+                # first character, "#", which fails the complex-a3m check and falls
+                # through to a single-sequence fallback. That path does not raise:
+                # it would have run the whole grid against an empty alignment and
+                # returned confident-looking numbers with the MSA silently
+                # discarded.
+                queries=[(job.key, query_sequence, [a3m])],
+                result_dir=str(out_dir),
+                num_models=PARAMS.num_models,
+                num_recycles=PARAMS.num_recycles,
+                model_type=MODEL_TYPE,
+                msa_mode="single_sequence",
+                use_templates=False,
+                random_seed=PARAMS.random_seed,
+                is_complex=True,
+                rank_by="multimer",
+                # ColabFold's run() never downloads parameters; only its command
+                # line entry point does. Without this it looks in its default data
+                # directory, finds nothing, and fails. The weights volume is the
+                # whole reason cold starts are affordable.
+                data_dir=WEIGHTS_PATH,
+                user_agent=MMSEQS_USER_AGENT,
+            )
+            # The expensive part is done. Record that fact before touching any
+            # metric code, so a defect below cannot buy this prediction twice.
+            if not sorted(out_dir.glob("*scores*.json")):
+                raise FileNotFoundError(
+                    f"colabfold_run returned but wrote no scores JSON in {out_dir}. "
+                    "Refusing to mark this job as folded."
+                )
+            folded_path.write_text(
+                json.dumps(
+                    {
+                        "msa_seconds": round(msa_seconds, 1),
+                        "fold_seconds": round(time.time() - started - msa_seconds, 1),
+                        "jax_device_kind": gpu_kind,
+                    }
+                )
+                + "\n"
+            )
+            results_volume.commit()
 
         native_path = Path(RESULTS_PATH) / "natives" / f"{job.pdb_id}.pdb"
         metrics = collect_metrics(
@@ -1333,11 +1413,72 @@ if MODAL_AVAILABLE:  # pragma: no cover - requires Modal
 
         jobs = [Job(**payload) for payload in job_payloads]
         progress_path = Path(RESULTS_PATH) / "progress.json"
-        guard = BudgetGuard(budget_usd, PARAMS.usd_per_gpu_hour)
+        lease_path = Path(RESULTS_PATH) / "run_lease.json"
+        ledger_path = Path(RESULTS_PATH) / "spend_ledger.json"
         started = time.time()
+
+        # Only one driver may dispatch at a time.
+        #
+        # Two launches close together both read completed_keys, both find the
+        # same work outstanding, and both start. The metrics.json check inside
+        # predict is not a mutex: both containers pass it before either writes.
+        # Every overlapping job is then computed twice at full GPU cost. This
+        # happened on 28 July with three concurrent drivers.
+        #
+        # The lease is heartbeated, so a driver that dies does not block the
+        # next one forever.
+        results_volume.reload()
+        if lease_path.is_file():
+            try:
+                held = json.loads(lease_path.read_text())
+                age = time.time() - float(held.get("heartbeat", 0.0))
+            except (ValueError, OSError):
+                held, age = {}, LEASE_STALE_AFTER_S + 1
+            if age < LEASE_STALE_AFTER_S:
+                return {
+                    "refused": True,
+                    "reason": (
+                        f"another driver holds the run lease, last heartbeat "
+                        f"{age / 60:.1f} min ago. Two drivers dispatch the same "
+                        "jobs and you pay twice. Stop the other app first, or "
+                        f"wait {LEASE_STALE_AFTER_S / 60:.0f} minutes for the "
+                        "lease to go stale."
+                    ),
+                    "holder": held.get("run_id"),
+                }
+
+        run_id = f"{int(started)}-{len(jobs)}"
+
+        def take_lease() -> None:
+            lease_path.write_text(
+                json.dumps({"run_id": run_id, "heartbeat": time.time(), "n_jobs": len(jobs)}) + "\n"
+            )
+            results_volume.commit()
+
+        take_lease()
+
+        # Spend accumulates across restarts, because the money does.
+        #
+        # A fresh guard per invocation means a ceiling of 60 dollars is a
+        # ceiling per launch, not on the grid. Relaunch four times and you have
+        # authorised 240 without ever asking for it.
+        prior_usd = 0.0
+        if ledger_path.is_file():
+            try:
+                prior_usd = float(json.loads(ledger_path.read_text()).get("total_usd", 0.0))
+            except (ValueError, OSError):
+                prior_usd = 0.0
+
+        guard = BudgetGuard(max(budget_usd - prior_usd, 0.01), PARAMS.usd_per_gpu_hour)
         completed = 0
         failures: list[str] = []
         stopped_early = ""
+        if prior_usd >= budget_usd:
+            stopped_early = (
+                f"the ledger already records ${prior_usd:.2f} spent on this volume, "
+                f"at or above the ${budget_usd:.2f} ceiling. Raise --budget-usd to "
+                "continue; it is a total, not a per-launch allowance."
+            )
 
         def publish(state: str) -> None:
             progress_path.write_text(
@@ -1353,12 +1494,34 @@ if MODAL_AVAILABLE:  # pragma: no cover - requires Modal
                         "elapsed_minutes": round((time.time() - started) / 60.0, 1),
                         "stopped_early": stopped_early,
                         "recent_failures": failures[-5:],
+                        "run_id": run_id,
+                        "spent_usd_before_this_run": round(prior_usd, 2),
+                        "spent_usd_cumulative": round(prior_usd + guard.spent_usd, 2),
                     },
                     indent=2,
                     default=str,
                 )
                 + "\n"
             )
+            # Both written on the same cadence as progress, so a driver killed
+            # between batches loses at most one batch of accounting rather than
+            # the whole run's.
+            ledger_path.write_text(
+                json.dumps(
+                    {
+                        "total_usd": prior_usd + guard.spent_usd,
+                        "last_run_id": run_id,
+                        "note": (
+                            "cumulative estimated spend on this volume, so a "
+                            "ceiling means a total rather than a per-launch "
+                            "allowance"
+                        ),
+                    },
+                    indent=2,
+                )
+                + "\n"
+            )
+            take_lease()
             results_volume.commit()
 
         publish("running")
@@ -1383,11 +1546,25 @@ if MODAL_AVAILABLE:  # pragma: no cover - requires Modal
                         guard.record(result["wall_clock_s"])
                         completed += 1
                     else:
+                        # A failure consumed GPU time and produced nothing, and
+                        # its exception carries no duration. Charging it is the
+                        # only way the ceiling can stop a systematically failing
+                        # run, which is the run that most needs stopping.
+                        guard.record_failure()
                         failures.append(repr(result)[:200])
                 publish("running")
 
         publish("finished")
+        # Release rather than let it go stale, so the next launch is not made to
+        # wait for a driver that has already finished.
+        try:
+            lease_path.unlink()
+            results_volume.commit()
+        except OSError:
+            pass
+
         return {
+            "spent_usd_cumulative": round(prior_usd + guard.spent_usd, 2),
             "n_completed_this_run": completed,
             "n_failed_this_run": len(failures),
             "spent_usd_estimated": round(guard.spent_usd, 2),
