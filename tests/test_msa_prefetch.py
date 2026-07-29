@@ -302,3 +302,27 @@ def test_the_recost_excludes_jobs_of_unknown_provenance() -> None:
     assert 'r.get("jax_device_kind")' in source
     assert "EXCLUDED from the re-costing" in source
     assert "must not be used to plan a run" in source
+
+
+def test_results_from_another_backend_can_be_retired() -> None:
+    """37 jobs were folded on a CPU, and a paired comparison cannot span both.
+
+    AlphaFold on CPU and on GPU are not numerically identical. A design compared
+    against a reference from the other backend has part of its difference coming
+    from the kernels. Recomputing on one backend removes the question; caveating
+    it does not.
+    """
+    source = function_source("predict")
+    assert "redo: bool = False" in source
+    assert "stale.unlink(missing_ok=True)" in source, (
+        "a redo must clear the fold marker too, or it will skip the folding"
+    )
+
+    launcher = function_source("launch")
+    assert "set() if redo else completed_keys()" in launcher
+
+
+def test_redo_is_off_by_default_everywhere() -> None:
+    """Recomputing paid work by accident is the expensive kind of default."""
+    for name in ("predict", "drive", "launch"):
+        assert "redo: bool = False" in function_source(name), name

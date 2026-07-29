@@ -1130,7 +1130,7 @@ if MODAL_AVAILABLE:  # pragma: no cover - requires Modal
         # anyway, once whatever caused it has been looked at.
         retries=0,
     )
-    def predict(job_payload: dict, allow_msa_search: bool = False) -> dict:
+    def predict(job_payload: dict, allow_msa_search: bool = False, redo: bool = False) -> dict:
         """Refold one complex and return interface-resolved metrics.
 
         Writes the raw predicted PDB and a metrics JSON to the results volume
@@ -1148,8 +1148,15 @@ if MODAL_AVAILABLE:  # pragma: no cover - requires Modal
         metrics_path = out_dir / "metrics.json"
         folded_path = out_dir / "folded.json"
 
-        if metrics_path.is_file():
+        if metrics_path.is_file() and not redo:
             return json.loads(metrics_path.read_text())
+        if redo:
+            # Recompute from scratch on this backend, discarding the folded
+            # marker too. Used to retire results produced on other hardware: a
+            # paired comparison spanning two backends has part of its difference
+            # coming from the kernels rather than the charge.
+            for stale in (metrics_path, folded_path):
+                stale.unlink(missing_ok=True)
 
         out_dir.mkdir(parents=True, exist_ok=True)
         started = time.time()
@@ -1501,7 +1508,9 @@ if MODAL_AVAILABLE:  # pragma: no cover - requires Modal
         # not a generous bill.
         timeout=43200,
     )
-    def drive(job_payloads: list[dict], budget_usd: float, chunk_size: int) -> dict:
+    def drive(
+        job_payloads: list[dict], budget_usd: float, chunk_size: int, redo: bool = False
+    ) -> dict:
         """Run the whole grid from inside Modal, so no laptop is in the loop.
 
         The local launcher submits work batch by batch and holds the budget
@@ -1661,7 +1670,7 @@ if MODAL_AVAILABLE:  # pragma: no cover - requires Modal
                 batch_results = list(
                     predict.map(
                         [asdict(job) for job in batch],
-                        kwargs={"allow_msa_search": False},
+                        kwargs={"allow_msa_search": False, "redo": redo},
                         return_exceptions=True,
                     )
                 )
@@ -1833,8 +1842,18 @@ if MODAL_AVAILABLE:  # pragma: no cover - requires Modal
         min_residues: int = 0,
         max_residues: int = 0,
         only_betas: str = "",
+        redo: bool = False,
     ) -> None:
         """Start the grid on Modal and exit. Nothing needs to stay connected.
+
+        ``redo=True`` recomputes jobs that already have results, rather than
+        skipping them. The reason this exists is backend provenance: 37 jobs in
+        this grid were folded on a CPU because of a cuDNN mismatch, and
+        AlphaFold on CPU and on GPU are not numerically identical. A paired
+        comparison whose reference came from one and whose design came from the
+        other has part of its difference coming from the hardware. Retiring
+        those results and recomputing them on one backend costs a few dollars
+        and removes the question rather than caveating it.
 
         Use this rather than ``run`` when the machine launching it cannot be
         relied on to stay awake and online for several hours, which on this
@@ -1876,7 +1895,7 @@ if MODAL_AVAILABLE:  # pragma: no cover - requires Modal
             )
             return
 
-        done = completed_keys()
+        done = set() if redo else completed_keys()
         outstanding = [job for job in jobs if job.key not in done]
         if min_residues:
             outstanding = [j for j in outstanding if j.total_residues() >= min_residues]
@@ -1886,7 +1905,13 @@ if MODAL_AVAILABLE:  # pragma: no cover - requires Modal
             wanted = {float(b) for b in only_betas.replace(" ", "").split(",")}
             outstanding = [j for j in outstanding if j.beta in wanted]
 
-        print(f"{len(jobs)} job(s) in the grid, {len(done)} already on the volume")
+        if redo:
+            print(
+                "REDO: results already on the volume will be recomputed rather "
+                "than skipped.\nUse this to retire results produced on other "
+                "hardware, not by accident."
+            )
+        print(f"{len(jobs)} job(s) in the grid, {len(completed_keys())} already on the volume")
         if not outstanding:
             print("nothing outstanding. Collect what is there:")
             print("  modal volume get interface-charge-af2-results / ./modal_output")
@@ -1899,7 +1924,7 @@ if MODAL_AVAILABLE:  # pragma: no cover - requires Modal
             f"ceiling ${budget_usd:.2f}"
         )
 
-        call = drive.spawn([asdict(job) for job in outstanding], budget_usd, chunk_size)
+        call = drive.spawn([asdict(job) for job in outstanding], budget_usd, chunk_size, redo)
         print(f"\nstarted on Modal as {call.object_id}")
         print("This machine is no longer involved. Close the laptop, lose wifi, reboot.")
         print("\ncheck on it any time, from anywhere:")
