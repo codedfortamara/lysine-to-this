@@ -113,10 +113,29 @@ SECONDARY_METRICS = [
 #: the same thing in every row of the output.
 LOWER_IS_BETTER = {"interface_pae", "interface_rmsd_a"}
 
-#: pLDDT floor for "the designed chain folded". 70 is the conventional boundary
-#: between confident and low-confidence prediction and is used here because it
-#: is conventional, not because anything in this data suggested it.
+#: Absolute pLDDT floor for "the designed chain folded". Reported, but no longer
+#: the primary control.
+#:
+#: 70 is the conventional confident/low-confidence boundary, and it is the wrong
+#: yardstick here. That convention comes from MSA-backed predictions, whereas the
+#: designed chain is deliberately folded from its own sequence alone, because a
+#: design has no evolutionary history to search. Single-sequence predictions run
+#: systematically lower. On this data exactly one of 31 rows clears 70, which
+#: does not mean the designs collapsed; it means the threshold was imported from
+#: a different measurement regime.
 PLDDT_FLOOR = 70.0
+
+#: The control that is actually calibrated: how far the design's own confidence
+#: falls below the same complex at beta = 0.
+#:
+#: Both sides are single-sequence predictions of the same chain in the same
+#: complex, so the regime cancels. A design whose confidence has dropped by more
+#: than this many pLDDT points against its own reference has plausibly stopped
+#: folding, and an interface score from it says nothing about the interface.
+#:
+#: Ten points is a judgement, and the distribution it sits in is reported beside
+#: every result so the reader can see what it selected.
+PLDDT_DROP_LIMIT = 10.0
 
 #: A beta whose return rate falls this far below the best beta's is flagged.
 #: Not a threshold for excluding anything, only for saying so out loud.
@@ -279,6 +298,34 @@ def buffering_versus_survival(changes: pd.DataFrame, analysis_path: Path, seed: 
     }
 
 
+def retained_confidence(table: pd.DataFrame, drop_limit: float) -> pd.DataFrame:
+    """Rows whose designed chain is still folding, judged against their own beta = 0.
+
+    An absolute pLDDT floor cannot do this job here. The designed chain is folded
+    from its own sequence with no alignment, because a design has no evolutionary
+    history worth searching, and single-sequence AlphaFold predictions sit
+    systematically lower than MSA-backed ones. Importing the conventional 70 from
+    the MSA regime rejected 30 of 31 rows on this data, which says nothing about
+    the designs and everything about the threshold.
+
+    Comparing each design against the same complex at beta = 0 removes the
+    regime: both sides are single-sequence predictions of the same chain in the
+    same complex, so what remains is the charge. Rows with no reference are kept
+    rather than dropped, because their absence is a completeness problem and is
+    reported as one elsewhere; excluding them here would double-count it.
+    """
+    keys = list(PAIR_KEYS)
+    reference = (
+        table[table["beta"] == REFERENCE_BETA]
+        .set_index(keys)["designed_chain_plddt"]
+        .rename("reference_plddt")
+        .dropna()
+    )
+    joined = table.join(reference, on=keys, how="left")
+    drop = joined["reference_plddt"] - joined["designed_chain_plddt"]
+    return table[drop.isna() | (drop <= drop_limit)]
+
+
 def backend_consistency(table: pd.DataFrame) -> dict:
     """Did every design and its beta = 0 reference run on the same hardware?
 
@@ -356,6 +403,17 @@ def build_parser() -> argparse.ArgumentParser:
             "'refuse' stops and explains, 'drop' excludes those rows and keeps "
             "the control, 'no-control' keeps every row and reports the "
             "unfiltered result only."
+        ),
+    )
+    parser.add_argument(
+        "--plddt-drop-limit",
+        type=float,
+        default=PLDDT_DROP_LIMIT,
+        help=(
+            "How many pLDDT points a design may fall below its own beta = 0 "
+            "reference and still count as folding. This is the calibrated "
+            "control; --plddt-floor is reported alongside but is the wrong "
+            "yardstick for single-sequence predictions."
         ),
     )
     parser.add_argument("--seed", type=int, default=0)
@@ -473,6 +531,14 @@ def main(argv: list[str] | None = None) -> int:
         control_note = ""
         if folded_available:
             plddt = table["designed_chain_plddt"].dropna()
+            # The calibrated control: confidence relative to the same complex at
+            # beta = 0. Both are single-sequence predictions of the same chain,
+            # so the regime cancels and only the charge differs.
+            held_up = retained_confidence(table, args.plddt_drop_limit)
+            subsets.append((f"plddt_within_{args.plddt_drop_limit:g}_of_beta0", held_up))
+            # The absolute floor is kept as a secondary view, clearly labelled,
+            # because readers will expect to see it even though it is the wrong
+            # yardstick for single-sequence predictions.
             folded = table[table["designed_chain_plddt"] >= args.plddt_floor]
             subsets.append((f"designed_chain_plddt_ge_{args.plddt_floor:g}", folded))
             # Why the control produced nothing, when it produces nothing.

@@ -486,3 +486,98 @@ def test_the_warning_reaches_the_operator(tmp_path: Path) -> None:
     )
     assert result.returncode == 0, result.stderr
     assert "different hardware" in result.stderr
+
+
+# ---------------------------------------------------------------------------
+# The fold-quality control has to be calibrated for the regime it measures
+# ---------------------------------------------------------------------------
+
+
+def test_the_relative_control_survives_a_uniformly_low_pLDDT_regime(survival) -> None:
+    """The defect: an absolute floor imported from a different measurement regime.
+
+    The designed chain is folded from its own sequence with no alignment, because
+    a design has no evolutionary history worth searching. Single-sequence
+    AlphaFold predictions sit systematically lower than MSA-backed ones, and the
+    conventional floor of 70 comes from the MSA regime. On the real data it
+    rejected 30 of 31 rows, which says nothing about the designs.
+    """
+    table = synthetic_metrics(n_complexes=6)
+    # Everything low, as single-sequence predictions are, but internally stable.
+    table["designed_chain_plddt"] = 55.0
+
+    kept = survival.retained_confidence(table, drop_limit=10.0)
+
+    assert len(kept) == len(table), "a stable low-confidence regime must not be filtered out"
+    assert (table["designed_chain_plddt"] < survival.PLDDT_FLOOR).all(), (
+        "and the absolute floor would have rejected all of it"
+    )
+
+
+def test_a_design_that_lost_confidence_against_its_own_reference_is_excluded(survival) -> None:
+    """What the control is actually for: the design stopped folding."""
+    table = synthetic_metrics(n_complexes=4)
+    table["designed_chain_plddt"] = 80.0
+    collapsed = (table["pdb_id"] == "1ABC") & (table["beta"] == 3.0)
+    table.loc[collapsed, "designed_chain_plddt"] = 40.0
+
+    kept = survival.retained_confidence(table, drop_limit=10.0)
+
+    assert len(kept) == len(table) - 1
+    assert not ((kept["pdb_id"] == "1ABC") & (kept["beta"] == 3.0)).any()
+
+
+def test_a_design_more_confident_than_its_reference_is_kept(survival) -> None:
+    """The filter is one-sided. Rising confidence is not a failure to fold."""
+    table = synthetic_metrics(n_complexes=3)
+    table["designed_chain_plddt"] = 70.0
+    table.loc[table["beta"] == 1.5, "designed_chain_plddt"] = 95.0
+    assert len(survival.retained_confidence(table, drop_limit=10.0)) == len(table)
+
+
+def test_rows_without_a_reference_are_kept_not_quietly_dropped(survival) -> None:
+    """Their absence is a completeness problem, reported as one elsewhere.
+
+    Dropping them here as well would count the same gap twice, and would do it
+    invisibly under a label that says fold quality.
+    """
+    table = synthetic_metrics(n_complexes=3)
+    table["designed_chain_plddt"] = 80.0
+    table = table[~((table["pdb_id"] == "1ABC") & (table["beta"] == 0.0))]
+
+    kept = survival.retained_confidence(table, drop_limit=10.0)
+
+    assert (kept["pdb_id"] == "1ABC").sum() == (table["pdb_id"] == "1ABC").sum()
+
+
+def test_both_controls_are_reported(tmp_path: Path) -> None:
+    """The absolute floor stays visible, clearly labelled, because readers expect it."""
+    table = synthetic_metrics(n_complexes=6)
+    table["designed_chain_plddt"] = 55.0
+    metrics = tmp_path / "af2_metrics.csv"
+    table.to_csv(metrics, index=False)
+    out = tmp_path / "results"
+
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), "--metrics", str(metrics), "--results-dir", str(out)],
+        capture_output=True,
+        text=True,
+        cwd=REPO_ROOT,
+        timeout=300,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+    written = pd.read_csv(out / "af2_interface_survival.csv")
+    subsets = set(written["subset"])
+    assert any(s.startswith("plddt_within_") for s in subsets), subsets
+
+    # The absolute floor rejects everything in this regime, so it contributes no
+    # rows. That must be said rather than left as a silently absent subset: a
+    # reader who expects the conventional threshold needs to know it was applied
+    # and found nothing, not wonder whether it ran.
+    summary = json.loads((out / "af2_interface_survival_summary.json").read_text())
+    assert "no design cleared pLDDT" in summary["fold_quality_control_note"]
+    spread = summary["designed_chain_plddt_summary"]
+    assert spread["n_at_or_above_floor"] == 0
+    assert spread["median"] < spread["floor"]
