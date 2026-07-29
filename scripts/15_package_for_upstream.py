@@ -82,6 +82,43 @@ def git_commit() -> str:
         return "unknown"
 
 
+def clear_directory(path: Path, attempts: int = 5) -> None:
+    """Remove a directory tree, coping with Windows holding files open.
+
+    On a OneDrive-synced folder the sync client keeps handles on files it is
+    uploading, and ``shutil.rmtree`` fails with a bare PermissionError naming one
+    arbitrary path. The failure is transient: the handle is released within a
+    second or two.
+
+    Read-only flags are cleared as well, because git checkouts and archive
+    extraction both set them and Windows refuses a delete on a read-only file
+    rather than ignoring the bit as POSIX does.
+    """
+    import stat
+    import time
+
+    def make_writable(func, target, _exc):
+        """shutil's error callback: clear the read-only bit and try again."""
+        Path(target).chmod(stat.S_IWRITE)
+        func(target)
+
+    for attempt in range(attempts):
+        try:
+            shutil.rmtree(path, onexc=make_writable)
+            return
+        except PermissionError as exc:
+            if attempt == attempts - 1:
+                fail(
+                    f"could not clear {path}: {exc}\n\n"
+                    "Something is holding those files open. On Windows this is "
+                    "usually OneDrive syncing,\nan open Explorer window, or an "
+                    "editor. Either close them and retry, or assemble somewhere "
+                    "outside the synced folder:\n\n"
+                    "  python scripts/15_package_for_upstream.py --out C:\\rcsb_interface"
+                )
+            time.sleep(1.5 * (attempt + 1))
+
+
 def read_summary(results_dir: Path, name: str) -> dict:
     path = results_dir / name
     if not path.is_file():
@@ -293,7 +330,7 @@ def main(argv: list[str] | None = None) -> int:
 
     out = args.out
     if out.exists():
-        shutil.rmtree(out)
+        clear_directory(out)
     out.mkdir(parents=True)
 
     copied: list[str] = []
