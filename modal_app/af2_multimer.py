@@ -2432,6 +2432,55 @@ def ipsae(
     return result
 
 
+def pair_residues_by_sequence(native_chain: list, predicted_chain: list) -> list[tuple]:
+    """Match native residues to predicted ones by aligning their sequences.
+
+    Not by residue number. The native comes from the PDB with author
+    numbering, which starts wherever the depositor chose, skips ranges, and
+    carries insertion codes; ColabFold numbers its output 1..N by sequence
+    position. Pairing on the number therefore either compares the wrong
+    residues and returns a plausible RMSD, or matches nothing and returns
+    none at all, and there is no way to tell which from the output.
+
+    Insertion codes are the sharper version of the same problem: keying on
+    the integer alone collapses 52, 52A and 52B onto one entry.
+
+    The alignment is checked residue by residue afterwards, and any pair
+    whose amino acids disagree is dropped rather than measured.
+    """
+    from Bio.Align import PairwiseAligner
+    from Bio.Data.IUPACData import protein_letters_3to1
+
+    def one_letter(residue) -> str:
+        return protein_letters_3to1.get(residue.get_resname().capitalize(), "X")
+
+    native_seq = "".join(one_letter(r) for r in native_chain)
+    predicted_seq = "".join(one_letter(r) for r in predicted_chain)
+    if not native_seq or not predicted_seq:
+        return []
+
+    aligner = PairwiseAligner()
+    aligner.mode = "global"
+    aligner.open_gap_score = -10.0
+    aligner.extend_gap_score = -0.5
+    aligner.match_score = 2.0
+    aligner.mismatch_score = -1.0
+    alignment = next(iter(aligner.align(native_seq, predicted_seq)))
+
+    pairs = []
+    for (n_start, n_end), (p_start, _p_end) in zip(*alignment.aligned, strict=True):
+        for offset in range(n_end - n_start):
+            native_residue = native_chain[n_start + offset]
+            predicted_residue = predicted_chain[p_start + offset]
+            # Identity is the check that makes this safe. An alignment can
+            # place a gap plausibly and still be wrong; two residues that
+            # disagree are not the same residue.
+            if one_letter(native_residue) != one_letter(predicted_residue):
+                continue
+            pairs.append((native_residue, predicted_residue))
+    return pairs
+
+
 def interface_rmsd(
     native_path: Path,
     predicted_path: Path,
@@ -2478,53 +2527,66 @@ def interface_rmsd(
     interface_ids = definition.classification_for(designed_chain).ids_in(Partition.INTERFACE)
     wanted = {rid.seqid for rid in interface_ids}
 
-    def backbone(model, chain_label: str, seqids: set[int] | None) -> dict[int, dict]:
-        out: dict[int, dict] = {}
+    def ordered_residues(model, chain_label: str) -> list:
+        """Polymer residues of a chain in file order, hetero and water excluded."""
         if chain_label not in {c.id for c in model}:
-            return out
-        for residue in model[chain_label]:
-            if residue.id[0] != " ":
-                continue
-            seqid = residue.id[1]
-            if seqids is not None and seqid not in seqids:
-                continue
-            atoms = {a.get_id(): a for a in residue if a.get_id() in ("N", "CA", "C", "O")}
-            if len(atoms) == 4:
-                out[seqid] = atoms
-        return out
+            return []
+        return [r for r in model[chain_label] if r.id[0] == " "]
+
+    def backbone_atoms(residue) -> dict | None:
+        atoms = {a.get_id(): a for a in residue if a.get_id() in ("N", "CA", "C", "O")}
+        return atoms if len(atoms) == 4 else None
 
     # Superpose on the partner chain so that the RMSD reports interface
     # displacement rather than global drift.
-    native_partner = backbone(native, partner, None)
-    pred_partner = backbone(predicted, predicted_labels[partner], None)
-    shared_partner = sorted(set(native_partner) & set(pred_partner))
-    if len(shared_partner) < 10:
+    partner_pairs = [
+        (n, p)
+        for n, p in pair_residues_by_sequence(
+            ordered_residues(native, partner),
+            ordered_residues(predicted, predicted_labels[partner]),
+        )
+        if backbone_atoms(n) and backbone_atoms(p)
+    ]
+    if len(partner_pairs) < 10:
         return {
             "interface_rmsd_a": None,
             "interface_rmsd_note": (
-                f"only {len(shared_partner)} shared partner-chain residues, too few to superpose on"
+                f"only {len(partner_pairs)} partner-chain residues could be paired "
+                "by sequence, too few to superpose on"
             ),
         }
 
-    fixed = [native_partner[s][a] for s in shared_partner for a in ("N", "CA", "C", "O")]
-    moving = [pred_partner[s][a] for s in shared_partner for a in ("N", "CA", "C", "O")]
+    fixed = [backbone_atoms(n)[a] for n, _ in partner_pairs for a in ("N", "CA", "C", "O")]
+    moving = [backbone_atoms(p)[a] for _, p in partner_pairs for a in ("N", "CA", "C", "O")]
 
     superimposer = Superimposer()
     superimposer.set_atoms(fixed, moving)
     superimposer.apply(list(predicted.get_atoms()))
 
-    native_iface = backbone(native, designed_chain, wanted)
-    pred_iface = backbone(predicted, predicted_labels[designed_chain], wanted)
-    shared_iface = sorted(set(native_iface) & set(pred_iface))
-    if not shared_iface:
+    # Interface membership is defined on the native, so the filter is applied to
+    # the native side of each pair. Insertion codes are carried through, because
+    # residue.id is (hetflag, seqid, icode) and the interface ids are matched on
+    # seqid: a chain with insertion codes would otherwise pull in 52A alongside
+    # 52 or drop both.
+    interface_pairs = [
+        (n, p)
+        for n, p in pair_residues_by_sequence(
+            ordered_residues(native, designed_chain),
+            ordered_residues(predicted, predicted_labels[designed_chain]),
+        )
+        if n.id[1] in wanted and backbone_atoms(n) and backbone_atoms(p)
+    ]
+    if not interface_pairs:
         return {
             "interface_rmsd_a": None,
-            "interface_rmsd_note": "no shared interface residues after superposition",
+            "interface_rmsd_note": (
+                "no interface residues could be paired between native and prediction"
+            ),
         }
 
     deltas = [
-        native_iface[s][a].get_coord() - pred_iface[s][a].get_coord()
-        for s in shared_iface
+        backbone_atoms(n)[a].get_coord() - backbone_atoms(p)[a].get_coord()
+        for n, p in interface_pairs
         for a in ("N", "CA", "C", "O")
     ]
     rmsd = float(np.sqrt((np.asarray(deltas) ** 2).sum(axis=1).mean()))
@@ -2532,11 +2594,12 @@ def interface_rmsd(
     return {
         "interface_rmsd_a": rmsd,
         "interface_rmsd_note": (
-            f"backbone RMSD over {len(shared_iface)} native interface residues, "
-            f"superposed on {len(shared_partner)} residues of chain {partner}"
+            f"backbone RMSD over {len(interface_pairs)} native interface residues "
+            f"paired by sequence alignment, superposed on {len(partner_pairs)} "
+            f"residues of chain {partner}"
         ),
         "receptor_superposition_rmsd_a": float(superimposer.rms),
-        "n_interface_residues_compared": len(shared_iface),
+        "n_interface_residues_compared": len(interface_pairs),
     }
 
 
