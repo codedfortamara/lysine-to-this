@@ -309,7 +309,7 @@ def main(argv: list[str] | None = None) -> int:
             shutil.copy2(source, target)
         copied.append(relative)
 
-    for extra in ("pyproject.toml", "config.toml", "README.md"):
+    for extra in ("pyproject.toml", "config.toml", "HANDOVER.md", "README.md"):
         source = ROOT / extra
         if source.is_file():
             shutil.copy2(source, out / (f"upstream_{extra}" if extra == "README.md" else extra))
