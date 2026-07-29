@@ -425,9 +425,33 @@ def main(argv: list[str] | None = None) -> int:
         inputs=[p for p in (args.metrics, args.analysis) if p.is_file()],
     ) as manifest:
         subsets: list[tuple[str, pd.DataFrame]] = [("all_returned", table)]
+        control_note = ""
         if folded_available:
+            plddt = table["designed_chain_plddt"].dropna()
             folded = table[table["designed_chain_plddt"] >= args.plddt_floor]
             subsets.append((f"designed_chain_plddt_ge_{args.plddt_floor:g}", folded))
+            # Why the control produced nothing, when it produces nothing.
+            #
+            # "No fold-quality control was possible" on its own is useless: it
+            # cannot distinguish every design failing the pLDDT floor from a
+            # subset that has no beta = 0 rows left to pair against, and those
+            # call for opposite responses.
+            if folded.empty:
+                control_note = (
+                    f"no design cleared pLDDT {args.plddt_floor:g}. Observed "
+                    f"designed-chain pLDDT: median {plddt.median():.1f}, "
+                    f"range {plddt.min():.1f} to {plddt.max():.1f} over "
+                    f"{len(plddt)} row(s)."
+                )
+            elif paired_change(folded, PRIMARY_METRIC).empty:
+                with_reference = set(folded[folded["beta"] == REFERENCE_BETA]["pdb_id"])
+                control_note = (
+                    f"{len(folded)} row(s) cleared pLDDT {args.plddt_floor:g}, but "
+                    f"only {len(with_reference)} complex(es) among them have a "
+                    f"beta = {REFERENCE_BETA:g} row to pair against, so no paired "
+                    "change can be formed. The floor is filtering out references "
+                    "rather than only filtering out failures."
+                )
 
         rows: list[dict] = []
         for label, subset in subsets:
@@ -468,6 +492,21 @@ def main(argv: list[str] | None = None) -> int:
             "primary_all_returned": primary.to_dict(orient="records"),
             "primary_folded_only": folded_primary.to_dict(orient="records"),
             "fold_quality_reading": fold_quality_reading(primary, folded_primary),
+            "fold_quality_control_note": control_note,
+            "designed_chain_plddt_summary": (
+                {
+                    "n": int(table["designed_chain_plddt"].notna().sum()),
+                    "median": float(table["designed_chain_plddt"].median()),
+                    "min": float(table["designed_chain_plddt"].min()),
+                    "max": float(table["designed_chain_plddt"].max()),
+                    "floor": float(args.plddt_floor),
+                    "n_at_or_above_floor": int(
+                        (table["designed_chain_plddt"] >= args.plddt_floor).sum()
+                    ),
+                }
+                if folded_available
+                else None
+            ),
             "exploratory_buffering_versus_survival": exploratory,
         }
         summary_path = results_dir / "af2_interface_survival_summary.json"
@@ -489,6 +528,8 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
     print(f"\n{summary['fold_quality_reading']}", file=sys.stderr)
+    if summary.get("fold_quality_control_note"):
+        print(f"  reason: {summary['fold_quality_control_note']}", file=sys.stderr)
     if not summary["completeness"]["comparable_across_beta"]:
         print(
             f"\nWARNING: beta {summary['completeness']['betas_materially_depleted']} "

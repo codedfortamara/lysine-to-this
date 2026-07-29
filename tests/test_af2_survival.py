@@ -371,3 +371,53 @@ def test_the_colab_notebook_records_the_same_control(tmp_path: Path) -> None:
     )
     assert '"designed_chain_plddt"' in source
     assert '"partner_chain_plddt"' in source
+
+
+def test_it_says_why_the_control_produced_nothing(tmp_path: Path) -> None:
+    """ "No fold-quality control was possible" alone is useless.
+
+    It cannot distinguish every design failing the pLDDT floor from a subset
+    with no beta = 0 rows left to pair against, and those call for opposite
+    responses: one says the designs are bad, the other says the floor is
+    filtering out the references.
+    """
+    table = synthetic_metrics()
+    table["designed_chain_plddt"] = 40.0  # nothing clears the floor
+    metrics = tmp_path / "af2_metrics.csv"
+    table.to_csv(metrics, index=False)
+    out = tmp_path / "results"
+
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), "--metrics", str(metrics), "--results-dir", str(out)],
+        capture_output=True,
+        text=True,
+        cwd=REPO_ROOT,
+        timeout=300,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+    summary = json.loads((out / "af2_interface_survival_summary.json").read_text())
+    assert "no design cleared pLDDT" in summary["fold_quality_control_note"]
+    assert summary["designed_chain_plddt_summary"]["n_at_or_above_floor"] == 0
+    assert "reason:" in result.stderr
+
+
+def test_the_plddt_distribution_is_always_reported(tmp_path: Path) -> None:
+    """The floor is a judgement call, so the reader needs the spread it sits in."""
+    metrics = tmp_path / "af2_metrics.csv"
+    synthetic_metrics().to_csv(metrics, index=False)
+    out = tmp_path / "results"
+
+    subprocess.run(
+        [sys.executable, str(SCRIPT), "--metrics", str(metrics), "--results-dir", str(out)],
+        capture_output=True,
+        text=True,
+        cwd=REPO_ROOT,
+        timeout=300,
+        check=False,
+    )
+    summary = json.loads((out / "af2_interface_survival_summary.json").read_text())
+    spread = summary["designed_chain_plddt_summary"]
+    assert spread["min"] <= spread["median"] <= spread["max"]
+    assert spread["floor"] == 70.0
