@@ -67,6 +67,7 @@ import argparse
 import io
 import json
 import os
+import subprocess
 import sys
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
@@ -954,6 +955,29 @@ def require_gpu_backend() -> str:
     is cheap; two hours of one is not.
     """
     import jax
+
+    # Touch the driver before asking JAX for devices.
+    #
+    # A run on L4 produced four consecutive 1200 second timeouts with no output
+    # after the import banner: the container never reached ColabFold's first
+    # print, and the only step in between is CUDA initialisation. Modal
+    # documents an intermittent CUDA-init hang on some instances. nvidia-smi
+    # forces the driver up first and fails fast and loudly if it cannot, rather
+    # than hanging inside JAX where there is nothing to see.
+    probe = subprocess.run(
+        ["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader"],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    if probe.returncode != 0:
+        raise RuntimeError(
+            "nvidia-smi failed inside a GPU container, so the driver is not up.\n"
+            f"stdout: {probe.stdout!r}\nstderr: {probe.stderr!r}\n"
+            "Folding here would either hang until the timeout or run on CPU at "
+            "GPU prices."
+        )
 
     devices = jax.devices()
     for device in devices:

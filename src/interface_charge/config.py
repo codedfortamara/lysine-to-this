@@ -304,19 +304,23 @@ class AF2Params:
 
     #: GPU type requested from Modal.
     #:
-    #: L4, not A100. Three reasons, all of them money.
+    #: A100-40GB, chosen on evidence rather than on price.
     #:
-    #: It costs 0.80 an hour against 2.10. It is slower per job, perhaps two to
-    #: three times, so the cost per job comes out lower rather than merely
-    #: proportional. And it is far less contended: the A100 pool is the most
-    #: fought over Modal has, which on 29 July put containers into a preemption
-    #: loop that ran 141 minutes, completed nothing, and was billed in full.
+    #: L4 was tried, at 0.80 an hour against 2.10, and it does not work here.
+    #: Four consecutive jobs of under 200 residues hit the 1200 second timeout
+    #: having produced no ColabFold output whatsoever: two oneDNN lines at import
+    #: and then silence. The only step between those lines and ColabFold's first
+    #: print is CUDA device initialisation, and Modal documents an intermittent
+    #: CUDA-init hang on some L4 instances.
     #:
-    #: 24 GB is ample for what remains. The complexes under 450 residues have a
-    #: median total length of 270, and AlphaFold-Multimer memory grows with the
-    #: square of length. The nine complexes that need more than this are exactly
-    #: the ones already excluded on cost.
-    gpu_type: str = "L4"
+    #: Every job that has ever completed in this project ran on an A100. That is
+    #: the whole of the evidence, and it outranks the price list.
+    #:
+    #: The reasons A100 was abandoned are now handled elsewhere: the CPU fallback
+    #: is fixed by the cuDNN pin, and the runaway cost by a 1200 second timeout,
+    #: six containers, no retries, and a circuit breaker. A stuck job costs 0.70
+    #: rather than 4.20, and four in a row stop the run.
+    gpu_type: str = "A100-40GB"
 
     #: Per-call timeout in seconds, sized for the work that remains.
     #:

@@ -1085,16 +1085,28 @@ def test_the_driver_consults_the_circuit_breaker() -> None:
     assert "consecutive_failures(batch_results)" in source
 
 
-def test_the_hardware_is_chosen_for_cost() -> None:
-    """A100 is the priciest and most contended card Modal has.
+def test_the_hardware_is_one_that_has_actually_worked() -> None:
+    """Chosen on evidence, not on the price list.
 
-    The complexes still in scope have a median total length of 270 residues and
-    a maximum of 448, which fits 24 GB with room to spare.
+    L4 was picked purely on price at 0.80 an hour, and four consecutive jobs of
+    under 200 residues then hit the 1200 second timeout having produced no
+    ColabFold output at all: two oneDNN lines at import and then silence. The
+    only step in between is CUDA initialisation, which Modal documents as
+    intermittently hanging on some L4 instances.
+
+    Every job that has ever completed in this project ran on an A100. Cost is
+    held down by the timeout, the container count and the circuit breaker, not
+    by picking the cheapest card and hoping.
     """
     from interface_charge.config import DEFAULT_CONFIG, MODAL_GPU_RATES_USD_PER_HOUR
 
-    rate = MODAL_GPU_RATES_USD_PER_HOUR[DEFAULT_CONFIG.af2.gpu_type]
-    assert rate <= 1.10, f"{DEFAULT_CONFIG.af2.gpu_type} at ${rate}/hour is not a low-cost choice"
+    params = DEFAULT_CONFIG.af2
+    assert params.gpu_type in MODAL_GPU_RATES_USD_PER_HOUR, (
+        "a GPU with no recorded rate cannot be budgeted for"
+    )
+    assert params.gpu_type.startswith(("A100", "A10G", "L40S")), (
+        f"{params.gpu_type} has not been shown to complete a job in this project"
+    )
 
 
 def test_containers_are_few_enough_to_amortise_the_model_load() -> None:
@@ -1148,7 +1160,11 @@ def test_a_single_stuck_job_cannot_cost_much() -> None:
 
     params = DEFAULT_CONFIG.af2
     worst_case = params.timeout_s / 3600.0 * params.rate_usd_per_hour()
-    assert worst_case <= 0.50, f"a stuck job can still cost ${worst_case:.2f}"
+    assert worst_case <= 1.00, f"a stuck job can still cost ${worst_case:.2f}"
+    # And the whole batch that must fail before the breaker reacts. That is the
+    # real exposure: a systematic fault burns a full chunk before anything stops.
+    batch = worst_case * params.max_consecutive_failures
+    assert batch <= 4.00, f"a fully failing batch costs ${batch:.2f} before it stops"
 
 
 def test_the_ledger_can_be_corrected_from_provider_billing() -> None:
@@ -1186,3 +1202,18 @@ def test_correcting_the_ledger_alone_does_not_launch_anything() -> None:
     correction = source[source.index("set_ledger_usd >= 0.0") :]
     assert "if budget_usd <= 0.0 and additional_usd <= 0.0:" in correction
     assert "return" in correction
+
+
+def test_the_driver_is_probed_before_jax_is_asked_for_devices() -> None:
+    """Four jobs hung for 1200s each with no output beyond the import banner.
+
+    The only step between JAX importing and ColabFold's first print is CUDA
+    device initialisation, and Modal documents that hanging intermittently.
+    nvidia-smi forces the driver up first, so a broken container dies in seconds
+    with something readable instead of hanging where there is nothing to see.
+    """
+    af2 = _af2()
+    source = _function_source(af2, "require_gpu_backend")
+    assert "nvidia-smi" in source
+    assert source.index("nvidia-smi") < source.index("jax.devices()")
+    assert "timeout=120" in source, "the probe itself must not be able to hang"
