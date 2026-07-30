@@ -1,9 +1,12 @@
 # Handover brief for a fresh model
 
 You are picking up an unfinished piece of computational work. The previous
-assistant (Claude) got the analysis done and failed on the compute. Read this
-whole file before running anything, because the failures here cost real money
-and some of them are non-obvious.
+assistant got the analysis done and failed on the compute. Read this whole file
+before running anything, because the failures here cost real money and some of
+them are non-obvious.
+
+`HANDOVER.md` is the same story written for the co-author, without the
+engineering detail. This file is the technical one.
 
 ## Who and what
 
